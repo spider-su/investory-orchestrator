@@ -9,48 +9,24 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 
-ReviewStatus = Literal[
-    "approved",
-    "changes_required",
-]
+ReviewStatus = Literal["approved", "changes_required"]
 
 
 class ReviewFinding(BaseModel):
-    severity: Literal[
-        "blocking",
-        "warning",
-        "suggestion",
-    ]
-    title: str = Field(
-        description="Short title describing the finding."
-    )
-    description: str = Field(
-        description="Concrete explanation of the problem."
-    )
-    file: str | None = Field(
-        default=None,
-        description="Related repository file, when known.",
-    )
-    recommendation: str = Field(
-        description="Specific recommended correction."
-    )
+    severity: Literal["blocking", "warning", "suggestion"]
+    title: str
+    description: str
+    file: str | None = None
+    recommendation: str
 
 
 class ReviewResult(BaseModel):
     status: ReviewStatus
-    summary: str = Field(
-        description="Concise review summary."
-    )
-    requirements_satisfied: list[str] = Field(
-        description="Requirements that are demonstrably satisfied."
-    )
-    missing_requirements: list[str] = Field(
-        description="Requirements not implemented or not demonstrated."
-    )
-    findings: list[ReviewFinding]
-    tests_reviewed: list[str] = Field(
-        description="Validation and test evidence considered."
-    )
+    summary: str
+    requirements_satisfied: list[str] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
+    findings: list[ReviewFinding] = Field(default_factory=list)
+    tests_reviewed: list[str] = Field(default_factory=list)
 
 
 class ReviewerError(RuntimeError):
@@ -80,23 +56,12 @@ def _run_git(
 
 
 def _branch_diff(workspace: Path) -> str:
+    sections: list[str] = []
+
     committed = _run_git(
         workspace,
         ["diff", "--no-ext-diff", "origin/main...HEAD"],
     )
-
-    uncommitted = _run_git(
-        workspace,
-        ["diff", "--no-ext-diff", "--", "."],
-    )
-
-    staged = _run_git(
-        workspace,
-        ["diff", "--cached", "--no-ext-diff", "--", "."],
-    )
-
-    sections: list[str] = []
-
     if committed.strip():
         sections.extend(
             [
@@ -105,6 +70,10 @@ def _branch_diff(workspace: Path) -> str:
             ]
         )
 
+    staged = _run_git(
+        workspace,
+        ["diff", "--cached", "--no-ext-diff", "--", "."],
+    )
     if staged.strip():
         sections.extend(
             [
@@ -113,6 +82,10 @@ def _branch_diff(workspace: Path) -> str:
             ]
         )
 
+    uncommitted = _run_git(
+        workspace,
+        ["diff", "--no-ext-diff", "--", "."],
+    )
     if uncommitted.strip():
         sections.extend(
             [
@@ -121,10 +94,11 @@ def _branch_diff(workspace: Path) -> str:
             ]
         )
 
-    if not sections:
-        return "No changes compared with origin/main."
-
-    return "\n\n".join(sections)
+    return (
+        "\n\n".join(sections)
+        if sections
+        else "No changes compared with origin/main."
+    )
 
 
 def review_implementation(
@@ -149,20 +123,13 @@ def review_implementation(
         method="json_schema",
     )
 
-    diff = _branch_diff(workspace)
-
     prompt = f"""
 You are reviewing an implementation in the Investory repository.
 
-GitHub issue:
+Issue:
+#{issue_number} — {issue_title}
 
-Number:
-#{issue_number}
-
-Title:
-{issue_title}
-
-Body:
+Issue body:
 {issue_body or "No issue body was provided."}
 
 Approved implementation plan:
@@ -172,22 +139,18 @@ Validation output:
 {validation_output or "No validation output was supplied."}
 
 Git diff:
-{diff}
+{_branch_diff(workspace)}
 
 Review rules:
-- Review only against the issue and approved implementation plan.
-- Verify each overall and step-level acceptance criterion.
-- Verify that validation evidence is relevant and successful.
+- Review only against the issue and approved plan.
+- Verify overall and step-level acceptance criteria.
 - Check for missing behaviour, incorrect behaviour, unrelated changes,
-  weakened tests, missing tests, unsafe error handling, and accidental
-  implementation of future scope.
-- Do not require stylistic changes unless they affect correctness,
-  maintainability, or repository conventions.
-- A blocking finding must result in status changes_required.
-- Missing acceptance criteria must result in status changes_required.
-- Warnings and suggestions alone may still result in approved.
+  weakened tests, missing tests, and unsafe error handling.
+- Missing acceptance criteria require changes_required.
+- Blocking findings require changes_required.
+- Warnings or suggestions alone may still be approved.
 - Do not modify code.
-- Do not invent findings unsupported by the supplied diff or requirements.
+- Do not invent findings unsupported by the supplied evidence.
 """.strip()
 
     try:
@@ -202,15 +165,97 @@ Review rules:
             "Reviewer returned an unexpected response type."
         )
 
-    has_blocking_findings = any(
+    if result.missing_requirements or any(
         finding.severity == "blocking"
         for finding in result.findings
-    )
-
-    if (
-        has_blocking_findings
-        or result.missing_requirements
     ):
         result.status = "changes_required"
 
     return result
+
+
+def review_to_markdown(review: ReviewResult) -> str:
+    status_text = (
+        "Approved"
+        if review.status == "approved"
+        else "Changes required"
+    )
+
+    lines = [
+        "<!-- investory-orchestrator-review -->",
+        "## Automated implementation review",
+        "",
+        f"**Status:** {status_text}",
+        "",
+        review.summary,
+    ]
+
+    if review.requirements_satisfied:
+        lines.extend(
+            [
+                "",
+                "### Requirements satisfied",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- {item}"
+            for item in review.requirements_satisfied
+        )
+
+    if review.missing_requirements:
+        lines.extend(
+            [
+                "",
+                "### Missing requirements",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- [ ] {item}"
+            for item in review.missing_requirements
+        )
+
+    if review.findings:
+        lines.extend(["", "### Findings", ""])
+
+        for finding in review.findings:
+            file_suffix = (
+                f" — `{finding.file}`"
+                if finding.file
+                else ""
+            )
+
+            lines.extend(
+                [
+                    (
+                        f"- **{finding.severity.upper()}: "
+                        f"{finding.title}**{file_suffix}"
+                    ),
+                    f"  - {finding.description}",
+                    f"  - Fix: {finding.recommendation}",
+                ]
+            )
+
+    if review.tests_reviewed:
+        lines.extend(
+            [
+                "",
+                "### Validation reviewed",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- {item}"
+            for item in review.tests_reviewed
+        )
+
+    lines.extend(
+        [
+            "",
+            "---",
+            "_Generated by Investory Orchestrator._",
+        ]
+    )
+
+    return "\n".join(lines)
