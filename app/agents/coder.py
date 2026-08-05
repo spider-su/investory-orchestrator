@@ -33,7 +33,9 @@ def run_coder(
     issue_number: int,
     issue_title: str,
     issue_body: str,
+    step: dict,
     validation_output: str,
+    review_feedback: dict,
     attempt: int,
     max_attempts: int,
 ) -> str:
@@ -46,11 +48,17 @@ Title:
 Description:
 {issue_body or "No issue body was provided."}
 
+Current implementation step:
+{step}
+
 Attempt:
 {attempt} of {max_attempts}
 
 Previous validation output:
 {validation_output or "No previous validation failure."}
+
+Reviewer feedback:
+{review_feedback or "None"}
 
 Current git diff:
 {_git_diff(workspace) or "No uncommitted changes."}

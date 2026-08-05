@@ -78,13 +78,27 @@ def planner_node(state: WorkflowState) -> dict:
             f"{len(plan.open_questions)} open question(s)"
         )
 
+    plan_dict = plan.model_dump(mode="json")
+    steps = [
+        {
+            **step,
+            "status": "pending",
+            "attempts": 0,
+            "commit_sha": "",
+        }
+        for step in plan_dict["steps"]
+    ]
+
     return {
-        "plan": plan.model_dump(mode="json"),
+        "workflow_status": "planning",
+        "plan": plan_dict,
+        "steps": steps,
         "plan_markdown": markdown,
         "plan_published": False,
         "planning_error": "",
         "requires_user_input": requires_user_input,
         "current_step": 0,
+        "completed_steps": [],
         "error": "",
     }
 
@@ -194,8 +208,43 @@ def start_environment_node(state: WorkflowState) -> dict:
     }
 
 
+def prepare_current_step_node(state: WorkflowState) -> dict:
+    index = state["current_step"]
+    steps = [dict(step) for step in state["steps"]]
+
+    if index >= len(steps):
+        raise RuntimeError("Current step is outside the implementation plan")
+
+    steps[index]["status"] = "in_progress"
+    step = steps[index]
+
+    print(
+        f"Starting step {index + 1}/{len(steps)}: "
+        f"{step['id']} — {step['title']}"
+    )
+
+    return {
+        "workflow_status": "implementing",
+        "steps": steps,
+        "attempt": 0,
+        "coder_summary": "",
+        "coder_error": "",
+        "validation_status": "not_started",
+        "validation_exit_code": 0,
+        "test_output": "",
+        "tests_passed": False,
+        "review_status": "not_started",
+        "review": {},
+        "review_markdown": "",
+        "review_error": "",
+        "blocked_reason": "",
+        "error": "",
+    }
+
+
 def coder_node(state: WorkflowState) -> dict:
     next_attempt = state["attempt"] + 1
+    step = state["steps"][state["current_step"]]
 
     print(
         f"Running coder attempt "
@@ -208,7 +257,9 @@ def coder_node(state: WorkflowState) -> dict:
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
             issue_body=state["issue_body"],
+            step=step,
             validation_output=state["test_output"],
+            review_feedback=state["review"],
             attempt=next_attempt,
             max_attempts=state["max_attempts"],
         )
@@ -220,12 +271,17 @@ def coder_node(state: WorkflowState) -> dict:
         return {
             "coder_summary": "",
             "coder_error": message,
+            "blocked_reason": message,
             "error": message,
         }
 
     print("Coder completed")
 
     return {
+        "workflow_status": "implementing",
+        "attempt": next_attempt,
+        "review": {},
+        "review_status": "not_started",
         "coder_summary": summary,
         "coder_error": "",
         "error": "",
@@ -234,7 +290,7 @@ def coder_node(state: WorkflowState) -> dict:
 
 def route_after_environment(state: WorkflowState) -> str:
     if state["environment_ready"]:
-        return "coder"
+        return "prepare_current_step"
 
     return "environment_failure"
 
@@ -251,29 +307,34 @@ def run_validation_node(state: WorkflowState) -> dict:
         print("Validation succeeded")
 
         return {
+            "workflow_status": "validating",
             "validation_status": "validation_success",
             "validation_exit_code": 0,
             "test_output": result["output"],
             "tests_passed": True,
-            "attempt": state["attempt"] + 1,
             "error": "",
         }
 
     print("Project validation failed")
 
     return {
+        "workflow_status": "validating",
         "validation_status": "project_validation_failure",
         "validation_exit_code": result["exit_code"],
         "test_output": result["output"],
         "tests_passed": False,
-        "attempt": state["attempt"] + 1,
+        "blocked_reason": (
+            f"Validation failed after {state['attempt']} attempts."
+            if state["attempt"] >= state["max_attempts"]
+            else ""
+        ),
         "error": "",
     }
 
 
 def route_after_validation(state: WorkflowState) -> str:
     if state["validation_status"] == "validation_success":
-        return "validation_success"
+        return "reviewer"
 
     if state["attempt"] < state["max_attempts"]:
         return "coder"
@@ -317,6 +378,7 @@ def validation_success_node(state: WorkflowState) -> dict:
 
 def reviewer_node(state: WorkflowState) -> dict:
     print("Reviewing implementation")
+    step = state["steps"][state["current_step"]]
 
     try:
         review = review_implementation(
@@ -324,7 +386,13 @@ def reviewer_node(state: WorkflowState) -> dict:
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
             issue_body=state["issue_body"],
-            plan=state["plan"],
+            plan={
+                "overall_acceptance_criteria": state["plan"].get(
+                    "acceptance_criteria",
+                    [],
+                ),
+                "current_step": step,
+            },
             validation_output=state["test_output"],
         )
     except ReviewerError as error:
@@ -347,6 +415,7 @@ def reviewer_node(state: WorkflowState) -> dict:
     print(f"Review result: {review.status}")
 
     return {
+        "workflow_status": "reviewing",
         "review_status": review.status,
         "review": review.model_dump(mode="json"),
         "review_markdown": markdown,
@@ -385,7 +454,7 @@ def route_after_reviewer(
     state: WorkflowState,
 ) -> str:
     if state["review_status"] == "review_failure":
-        return "review_failure"
+        return "blocked"
 
     return "publish_review"
 
@@ -394,7 +463,38 @@ def route_after_review_publication(
     state: WorkflowState,
 ) -> str:
     if state["review_status"] == "approved":
-        return "review_approved"
+        return "complete_step"
+
+    if state["attempt"] < state["max_attempts"]:
+        return "coder"
+
+    return "blocked"
+
+
+def complete_step_node(state: WorkflowState) -> dict:
+    index = state["current_step"]
+    steps = [dict(step) for step in state["steps"]]
+    step = steps[index]
+
+    step["status"] = "completed"
+    step["attempts"] = state["attempt"]
+
+    print(f"Completed {step['id']}: {step['title']}")
+
+    return {
+        "steps": steps,
+        "completed_steps": [
+            *state["completed_steps"],
+            step["id"],
+        ],
+        "current_step": index + 1,
+        "attempt": 0,
+    }
+
+
+def route_after_step_completion(state: WorkflowState) -> str:
+    if state["current_step"] >= len(state["steps"]):
+        return "workflow_complete"
 
     return "review_changes_required"
 
@@ -469,6 +569,10 @@ def build_graph():
         "start_environment",
         start_environment_node,
     )
+    builder.add_node(
+        "prepare_current_step",
+        prepare_current_step_node,
+    )
     builder.add_node("coder", coder_node)
     builder.add_node(
         "run_validation",
@@ -491,18 +595,7 @@ def build_graph():
         "publish_review",
         publish_review_node,
     )
-    builder.add_node(
-        "review_approved",
-        review_approved_node,
-    )
-    builder.add_node(
-        "review_changes_required",
-        review_changes_required_node,
-    )
-    builder.add_node(
-        "review_failure",
-        review_failure_node,
-    )
+    builder.add_node("complete_step", complete_step_node)
     builder.add_node("blocked", blocked_node)
     builder.add_node("cleanup", cleanup_node)
 
@@ -539,10 +632,12 @@ def build_graph():
         "start_environment",
         route_after_environment,
         {
-            "coder": "coder",
+            "prepare_current_step": "prepare_current_step",
             "environment_failure": "environment_failure",
         },
     )
+
+    builder.add_edge("prepare_current_step", "coder")
 
     builder.add_conditional_edges(
         "coder",
@@ -557,22 +652,11 @@ def build_graph():
         "run_validation",
         route_after_validation,
         {
-            "validation_success": "validation_success",
+            "reviewer": "reviewer",
             "coder": "coder",
             "blocked": "blocked",
         },
     )
-
-    builder.add_edge(
-        "validation_success",
-        "reviewer",
-    )
-    builder.add_edge("review_approved", "cleanup")
-    builder.add_edge(
-        "review_changes_required",
-        "cleanup",
-    )
-    builder.add_edge("review_failure", "cleanup")
 
     builder.add_conditional_edges(
         "reviewer",
@@ -587,15 +671,23 @@ def build_graph():
         "publish_review",
         route_after_review_publication,
         {
-            "review_approved": "review_approved",
-            "review_changes_required": (
-                "review_changes_required"
-            ),
+            "complete_step": "complete_step",
+            "coder": "coder",
+            "blocked": "blocked",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "complete_step",
+        route_after_step_completion,
+        {
+            "prepare_current_step": "prepare_current_step",
+            "workflow_complete": "workflow_complete",
         },
     )
 
     builder.add_edge("environment_failure", "cleanup")
-    builder.add_edge("validation_success", "cleanup")
+    builder.add_edge("workflow_complete", "cleanup")
     builder.add_edge("blocked", "cleanup")
     builder.add_edge("cleanup", END)
 
@@ -629,12 +721,15 @@ def main() -> None:
         "issue_number": args.issue,
         "issue_title": "",
         "issue_body": "",
+        "workflow_status": "new",
         "plan": {},
         "plan_markdown": "",
         "plan_published": False,
         "planning_error": "",
         "requires_user_input": False,
+        "steps": [],
         "current_step": 0,
+        "completed_steps": [],
         "workspace": "",
         "branch": "",
         "attempt": 0,
@@ -654,6 +749,14 @@ def main() -> None:
         "review_error": "",
         "coder_summary": "",
         "coder_error": "",
+        "commit_sha": "",
+        "pull_request_number": 0,
+        "pull_request_url": "",
+        "ci_status": "not_started",
+        "ci_run_id": 0,
+        "ci_url": "",
+        "ci_output": "",
+        "blocked_reason": "",
         "error": "",
     }
 
