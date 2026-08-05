@@ -28,4 +28,7 @@ class WorkflowState(TypedDict):
     test_output: str
     tests_passed: bool
 
+    coder_summary: str
+    coder_error: str
+
     error: str
