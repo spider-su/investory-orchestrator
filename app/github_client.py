@@ -160,6 +160,30 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def find_open_pr_by_branch(
+        self,
+        branch: str,
+    ) -> PullRequest | None:
+        repository = self.get_repository()
+        owner = repository.owner.login
+
+        try:
+            pull_requests = repository.get_pulls(
+                state="open",
+                head=f"{owner}:{branch}",
+            )
+
+            for pull_request in pull_requests:
+                return pull_request
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to search for an open pull request "
+                f"for branch '{branch}': "
+                f"{error.status} {error.data}"
+            ) from error
+
+        return None
+
     def get_pull_request(
         self,
         pull_request_number: int,

@@ -26,7 +26,11 @@ from app.test_runner import (
     start_environment,
     stop_environment,
 )
-from app.workspace import commit_step, prepare_workspace
+from app.workspace import (
+    commit_step,
+    prepare_workspace,
+    push_branch,
+)
 
 
 def load_issue(state: WorkflowState) -> dict:
@@ -504,7 +508,78 @@ def route_after_step_completion(state: WorkflowState) -> str:
     if state["current_step"] >= len(state["steps"]):
         return "workflow_complete"
 
-    return "review_changes_required"
+    return "prepare_current_step"
+
+
+def workflow_complete_node(state: WorkflowState) -> dict:
+    print("RESULT: ALL IMPLEMENTATION STEPS COMPLETED")
+    return {"workflow_status": "completed"}
+
+
+def push_branch_node(state: WorkflowState) -> dict:
+    client = GitHubAppClient()
+
+    push_branch(
+        client,
+        Path(state["workspace"]),
+        state["branch"],
+    )
+
+    print(f"Pushed branch: {state['branch']}")
+    return {}
+
+
+def create_draft_pr_node(state: WorkflowState) -> dict:
+    client = GitHubAppClient()
+
+    completed_steps = "\n".join(
+        f"- [x] {step['id']}: {step['title']}"
+        for step in state["steps"]
+        if step.get("status") == "completed"
+    )
+
+    body = (
+        f"Closes #{state['issue_number']}\n\n"
+        "## Summary\n\n"
+        f"{state['plan'].get('summary', '')}\n\n"
+        "## Completed steps\n\n"
+        f"{completed_steps}\n\n"
+        "## Validation\n\n"
+        "- Local validation passed for every step\n"
+        "- Automated reviewer approved every step\n"
+    )
+
+    pull_request = client.find_open_pr_by_branch(
+        state["branch"]
+    )
+
+    if pull_request is None:
+        pull_request = client.create_draft_pr(
+            title=(
+                f"Implement #{state['issue_number']}: "
+                f"{state['issue_title']}"
+            ),
+            body=body,
+            head=state["branch"],
+            base="main",
+        )
+        print(f"Created draft PR #{pull_request.number}")
+    else:
+        pull_request.edit(
+            title=(
+                f"Implement #{state['issue_number']}: "
+                f"{state['issue_title']}"
+            ),
+            body=body,
+        )
+        print(f"Updated PR #{pull_request.number}")
+
+    print(pull_request.html_url)
+
+    return {
+        "pull_request_number": pull_request.number,
+        "pull_request_url": pull_request.html_url,
+    }
 
 
 def review_approved_node(
@@ -604,6 +679,12 @@ def build_graph():
         publish_review_node,
     )
     builder.add_node("complete_step", complete_step_node)
+    builder.add_node(
+        "workflow_complete",
+        workflow_complete_node,
+    )
+    builder.add_node("push_branch", push_branch_node)
+    builder.add_node("create_draft_pr", create_draft_pr_node)
     builder.add_node("blocked", blocked_node)
     builder.add_node("cleanup", cleanup_node)
 
@@ -671,7 +752,7 @@ def build_graph():
         route_after_reviewer,
         {
             "publish_review": "publish_review",
-            "review_failure": "review_failure",
+            "blocked": "blocked",
         },
     )
 
@@ -695,7 +776,9 @@ def build_graph():
     )
 
     builder.add_edge("environment_failure", "cleanup")
-    builder.add_edge("workflow_complete", "cleanup")
+    builder.add_edge("workflow_complete", "push_branch")
+    builder.add_edge("push_branch", "create_draft_pr")
+    builder.add_edge("create_draft_pr", "cleanup")
     builder.add_edge("blocked", "cleanup")
     builder.add_edge("cleanup", END)
 
