@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -52,6 +51,39 @@ def _git_environment(token: str) -> dict[str, str]:
     return environment
 
 
+def _mark_safe_directory(workspace: Path) -> None:
+    subprocess.run(
+        [
+            "git",
+            "config",
+            "--global",
+            "--add",
+            "safe.directory",
+            str(workspace),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def _configure_git_identity(workspace: Path) -> None:
+    _run(
+        ["git", "config", "user.name", "Investory Orchestrator"],
+        cwd=workspace,
+    )
+
+    _run(
+        [
+            "git",
+            "config",
+            "user.email",
+            "investory-orchestrator@users.noreply.github.com",
+        ],
+        cwd=workspace,
+    )
+
+
 def prepare_workspace(
     client: GitHubAppClient,
     issue_number: int,
@@ -67,6 +99,8 @@ def prepare_workspace(
     branch = f"agent/issue-{issue_number}"
 
     if workspace.exists():
+        _mark_safe_directory(workspace)
+
         current_branch = _run(
             ["git", "branch", "--show-current"],
             cwd=workspace,
@@ -78,6 +112,7 @@ def prepare_workspace(
                 f"'{current_branch}', expected '{branch}'"
             )
 
+        _configure_git_identity(workspace)
         return workspace, branch
 
     workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -94,19 +129,52 @@ def prepare_workspace(
         env=environment,
     )
 
-    _run(["git", "checkout", "-b", branch], cwd=workspace)
+    _mark_safe_directory(workspace)
+
+    _run(
+        ["git", "checkout", "-b", branch],
+        cwd=workspace,
+    )
+
+    _configure_git_identity(workspace)
 
     return workspace, branch
 
-    def push_branch(
-        client: GitHubAppClient,
-        workspace: Path,
-        branch: str,
-    ) -> None:
-        environment = _git_environment(client.token)
 
-        _run(
-            ["git", "push", "-u", "origin", branch],
-            cwd=workspace,
-            env=environment,
-        )
+def commit_changes(
+    workspace: Path,
+    message: str,
+) -> str | None:
+    _mark_safe_directory(workspace)
+
+    status = _run(
+        ["git", "status", "--porcelain"],
+        cwd=workspace,
+    ).strip()
+
+    if not status:
+        return None
+
+    _run(["git", "add", "--all"], cwd=workspace)
+    _run(["git", "commit", "-m", message], cwd=workspace)
+
+    return _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+    ).strip()
+
+
+def push_branch(
+    client: GitHubAppClient,
+    workspace: Path,
+    branch: str,
+) -> None:
+    _mark_safe_directory(workspace)
+
+    environment = _git_environment(client.token)
+
+    _run(
+        ["git", "push", "-u", "origin", branch],
+        cwd=workspace,
+        env=environment,
+    )
