@@ -164,6 +164,25 @@ def commit_changes(
     ).strip()
 
 
+def commit_step(
+    workspace: Path,
+    step_id: str,
+    step_title: str,
+) -> str:
+    commit_sha = commit_changes(
+        workspace,
+        f"Complete {step_id}: {step_title}",
+    )
+
+    if commit_sha is not None:
+        return commit_sha
+
+    return _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+    ).strip()
+
+
 def push_branch(
     client: GitHubAppClient,
     workspace: Path,

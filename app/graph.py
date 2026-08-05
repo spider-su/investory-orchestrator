@@ -26,7 +26,7 @@ from app.test_runner import (
     start_environment,
     stop_environment,
 )
-from app.workspace import prepare_workspace
+from app.workspace import commit_step, prepare_workspace
 
 
 def load_issue(state: WorkflowState) -> dict:
@@ -476,10 +476,17 @@ def complete_step_node(state: WorkflowState) -> dict:
     steps = [dict(step) for step in state["steps"]]
     step = steps[index]
 
+    commit_sha = commit_step(
+        Path(state["workspace"]),
+        step["id"],
+        step["title"],
+    )
+
     step["status"] = "completed"
     step["attempts"] = state["attempt"]
+    step["commit_sha"] = commit_sha
 
-    print(f"Completed {step['id']}: {step['title']}")
+    print(f"Completed {step['id']} at {commit_sha}")
 
     return {
         "steps": steps,
@@ -489,6 +496,7 @@ def complete_step_node(state: WorkflowState) -> dict:
         ],
         "current_step": index + 1,
         "attempt": 0,
+        "commit_sha": commit_sha,
     }
 
 
