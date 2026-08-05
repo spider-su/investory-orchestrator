@@ -1,0 +1,20 @@
+services:
+  orchestrator:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DOCKER_CONFIG: /tmp/docker-config
+
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+      - ${HOST_WORKSPACES_DIR}:${HOST_WORKSPACES_DIR}
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    secrets:
+      - github-app-key
+
+secrets:
+  github-app-key:
+    file: ./secrets/github-app.pem

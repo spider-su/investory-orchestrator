@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+secrets/
+*.pem
+data/*.db
+workspaces/*
+!workspaces/.gitkeep
