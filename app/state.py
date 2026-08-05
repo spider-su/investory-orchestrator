@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 
 WorkflowStatus = Literal[
@@ -74,9 +74,10 @@ class WorkflowState(TypedDict):
     review_status: ReviewStatus
     review: dict[str, Any]
     review_markdown: str
+    review_published: bool
     review_error: str
 
-    commit_sha: str
+    commit_sha: Optional[str]
 
     pull_request_number: int
     pull_request_url: str

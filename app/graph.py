@@ -88,7 +88,7 @@ def planner_node(state: WorkflowState) -> dict:
             **step,
             "status": "pending",
             "attempts": 0,
-            "commit_sha": "",
+            "commit_sha": None,
         }
         for step in plan_dict["steps"]
     ]
@@ -497,7 +497,12 @@ def complete_step_node(state: WorkflowState) -> dict:
     step["attempts"] = state["attempt"]
     step["commit_sha"] = commit_sha
 
-    print(f"Completed {step['id']} at {commit_sha}")
+    if commit_sha is None:
+        print(
+            f"Completed {step['id']} without creating a new commit"
+        )
+    else:
+        print(f"Completed {step['id']} at {commit_sha}")
 
     return {
         "steps": steps,
@@ -524,70 +529,111 @@ def workflow_complete_node(state: WorkflowState) -> dict:
 
 
 def push_branch_node(state: WorkflowState) -> dict:
-    client = GitHubAppClient()
+    try:
+        client = GitHubAppClient()
 
-    push_branch(
-        client,
-        Path(state["workspace"]),
-        state["branch"],
-    )
+        push_branch(
+            client,
+            Path(state["workspace"]),
+            state["branch"],
+        )
+    except RuntimeError as error:
+        message = str(error)
+        print("Push branch failed")
+        print(message[-4000:])
+
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "error": message,
+        }
 
     print(f"Pushed branch: {state['branch']}")
-    return {}
+    return {
+        "blocked_reason": "",
+        "error": "",
+    }
+
+
+def route_after_push_branch(state: WorkflowState) -> str:
+    if state["workflow_status"] == "blocked":
+        return "blocked"
+
+    return "create_draft_pr"
 
 
 def create_draft_pr_node(state: WorkflowState) -> dict:
-    client = GitHubAppClient()
+    try:
+        client = GitHubAppClient()
 
-    completed_steps = "\n".join(
-        f"- [x] {step['id']}: {step['title']}"
-        for step in state["steps"]
-        if step.get("status") == "completed"
-    )
-
-    body = (
-        f"Closes #{state['issue_number']}\n\n"
-        "## Summary\n\n"
-        f"{state['plan'].get('summary', '')}\n\n"
-        "## Completed steps\n\n"
-        f"{completed_steps}\n\n"
-        "## Validation\n\n"
-        "- Local validation passed for every step\n"
-        "- Automated reviewer approved every step\n"
-    )
-
-    pull_request = client.find_open_pr_by_branch(
-        state["branch"]
-    )
-
-    if pull_request is None:
-        pull_request = client.create_draft_pr(
-            title=(
-                f"Implement #{state['issue_number']}: "
-                f"{state['issue_title']}"
-            ),
-            body=body,
-            head=state["branch"],
-            base="main",
+        completed_steps = "\n".join(
+            f"- [x] {step['id']}: {step['title']}"
+            for step in state["steps"]
+            if step.get("status") == "completed"
         )
-        print(f"Created draft PR #{pull_request.number}")
-    else:
-        pull_request.edit(
-            title=(
-                f"Implement #{state['issue_number']}: "
-                f"{state['issue_title']}"
-            ),
-            body=body,
-        )
-        print(f"Updated PR #{pull_request.number}")
 
-    print(pull_request.html_url)
+        body = (
+            f"Closes #{state['issue_number']}\n\n"
+            "## Summary\n\n"
+            f"{state['plan'].get('summary', '')}\n\n"
+            "## Completed steps\n\n"
+            f"{completed_steps}\n\n"
+            "## Validation\n\n"
+            "- Local validation passed for every step\n"
+            "- Automated reviewer approved every step\n"
+        )
+
+        pull_request = client.find_open_pr_by_branch(
+            state["branch"]
+        )
+
+        if pull_request is None:
+            pull_request = client.create_draft_pr(
+                title=(
+                    f"Implement #{state['issue_number']}: "
+                    f"{state['issue_title']}"
+                ),
+                body=body,
+                head=state["branch"],
+                base="main",
+            )
+            print(f"Created draft PR #{pull_request.number}")
+        else:
+            pull_request.edit(
+                title=(
+                    f"Implement #{state['issue_number']}: "
+                    f"{state['issue_title']}"
+                ),
+                body=body,
+            )
+            print(f"Updated PR #{pull_request.number}")
+
+        print(pull_request.html_url)
+    except RuntimeError as error:
+        message = str(error)
+        print("Draft PR creation failed")
+        print(message[-4000:])
+
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "error": message,
+        }
 
     return {
         "workflow_status": "completed",
         "pull_request_number": pull_request.number,
         "pull_request_url": pull_request.html_url,
+        "blocked_reason": "",
+        "error": "",
     }
+
+
+def route_after_create_draft_pr(state: WorkflowState) -> str:
+    if state["workflow_status"] == "blocked":
+        return "blocked"
+
+    return "cleanup"
 
 
 def review_approved_node(
@@ -796,8 +842,22 @@ def build_graph():
 
     builder.add_edge("environment_failure", "cleanup")
     builder.add_edge("workflow_complete", "push_branch")
-    builder.add_edge("push_branch", "create_draft_pr")
-    builder.add_edge("create_draft_pr", "cleanup")
+    builder.add_conditional_edges(
+        "push_branch",
+        route_after_push_branch,
+        {
+            "create_draft_pr": "create_draft_pr",
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "create_draft_pr",
+        route_after_create_draft_pr,
+        {
+            "cleanup": "cleanup",
+            "blocked": "blocked",
+        },
+    )
     builder.add_edge("blocked", "cleanup")
     builder.add_edge("cleanup", END)
 
@@ -864,7 +924,7 @@ def main() -> None:
         "review_error": "",
         "coder_summary": "",
         "coder_error": "",
-        "commit_sha": "",
+        "commit_sha": None,
         "pull_request_number": 0,
         "pull_request_url": "",
         "ci_status": "not_started",
@@ -904,7 +964,6 @@ def main() -> None:
             config,
             {
                 "workflow_status": "implementing",
-                "attempt": 0,
                 "blocked_reason": "",
                 "coder_error": "",
                 "review_error": "",
