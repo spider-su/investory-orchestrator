@@ -14,12 +14,15 @@ def _git_diff(workspace: Path) -> str:
         ["git", "diff", "--", "."],
         cwd=workspace,
         text=True,
-        capture_output=True,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
     if result.returncode != 0:
-        return f"Unable to read git diff:\n{result.stderr}"
+        return (
+            "Unable to read git diff.\n"
+            f"stderr:\n{result.stderr}"
+        )
 
     return result.stdout
 
@@ -41,7 +44,7 @@ Title:
 {issue_title}
 
 Description:
-{issue_body}
+{issue_body or "No issue body was provided."}
 
 Attempt:
 {attempt} of {max_attempts}
@@ -57,14 +60,14 @@ Instructions:
 - Implement only this issue.
 - Make the smallest correct change.
 - Add or update tests when required.
-- Do not weaken, skip, or delete tests to obtain a passing build.
+- Do not weaken, skip, or delete tests.
 - Do not modify unrelated files.
 - Do not access or print secrets.
 - Leave all edits in the current workspace.
 - Do not commit, push, or create a pull request.
-- The orchestrator will run the complete validation separately.
+- The orchestrator runs complete validation separately.
 
-When finished, return a concise summary of the implementation.
+Return a concise implementation summary.
 """.strip()
 
     command = [
@@ -92,11 +95,27 @@ When finished, return a concise summary of the implementation.
         output = error.stdout or ""
 
         if isinstance(output, bytes):
-            output = output.decode(errors="replace")
+            output = output.decode(
+                "utf-8",
+                errors="replace",
+            )
 
         raise CoderError(
-            f"Coder timed out after 1800 seconds.\n{output}"
+            "Coder timed out after 1800 seconds.\n"
+            f"{output}"
         ) from error
     except OSError as error:
         raise CoderError(
             f"Could not start Codex CLI: {error}"
+        ) from error
+
+    output = result.stdout or "(Codex produced no output)"
+
+    if result.returncode != 0:
+        raise CoderError(
+            f"Codex failed with exit code "
+            f"{result.returncode}:\n"
+            f"{output}"
+        )
+
+    return output
