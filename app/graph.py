@@ -715,6 +715,11 @@ def build_graph():
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--issue", type=int, required=True)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a blocked workflow from its saved checkpoint.",
+    )
     args = parser.parse_args()
 
     initial_state: WorkflowState = {
@@ -767,6 +772,39 @@ def main() -> None:
     }
 
     graph = build_graph()
+    
+    if args.resume:
+        snapshot = graph.get_state(config)
+
+        if not snapshot.values:
+            raise RuntimeError(
+                f"No checkpoint exists for issue #{args.issue}"
+            )
+
+        saved_state = dict(snapshot.values)
+        workflow_status = saved_state.get("workflow_status")
+
+        if workflow_status != "blocked":
+            raise RuntimeError(
+                "Only blocked workflows can be resumed. "
+                f"Current status: {workflow_status}"
+            )
+
+        graph.update_state(
+            config,
+            {
+                "workflow_status": "implementing",
+                "attempt": 0,
+                "blocked_reason": "",
+                "coder_error": "",
+                "review_error": "",
+                "error": "",
+            },
+            as_node="prepare_current_step",
+        )
+        graph.invoke(None, config=config)
+        return
+    
     graph.invoke(initial_state, config=config)
 
 
