@@ -53,7 +53,7 @@ def planner_node(state: WorkflowState) -> dict:
         )
     except PlannerError as error:
         message = str(error)
-        print("Planning failure")
+        print("Planning failed")
         print(message)
 
         return {
@@ -183,7 +183,7 @@ def start_environment_node(state: WorkflowState) -> dict:
             "error": "",
         }
 
-    print("Environment failure")
+    print("Environment setup failed")
 
     return {
         "environment_ready": False,
@@ -214,7 +214,7 @@ def coder_node(state: WorkflowState) -> dict:
         )
     except CoderError as error:
         message = str(error)
-        print("Coder failure")
+        print("Coder failed")
         print(message[-4000:])
 
         return {
@@ -248,7 +248,7 @@ def run_validation_node(state: WorkflowState) -> dict:
     )
 
     if result["success"]:
-        print("Validation success")
+        print("Validation succeeded")
 
         return {
             "validation_status": "validation_success",
@@ -259,7 +259,7 @@ def run_validation_node(state: WorkflowState) -> dict:
             "error": "",
         }
 
-    print("Project validation failure")
+    print("Project validation failed")
 
     return {
         "validation_status": "project_validation_failure",
@@ -330,7 +330,7 @@ def reviewer_node(state: WorkflowState) -> dict:
     except ReviewerError as error:
         message = str(error)
 
-        print("Review failure")
+        print("Review failed")
         print(message[-4000:])
 
         return {

@@ -146,9 +146,10 @@ Review rules:
 - Verify overall and step-level acceptance criteria.
 - Check for missing behaviour, incorrect behaviour, unrelated changes,
   weakened tests, missing tests, and unsafe error handling.
-- Missing acceptance criteria require changes_required.
-- Blocking findings require changes_required.
-- Warnings or suggestions alone may still be approved.
+- Any unmet acceptance criterion requires the changes_required status.
+- Any blocking finding requires the changes_required status.
+- An implementation may still be approved if it has only warnings or
+  suggestions.
 - Do not modify code.
 - Do not invent findings unsupported by the supplied evidence.
 """.strip()

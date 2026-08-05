@@ -42,7 +42,8 @@ class ImplementationPlan(BaseModel):
     )
     open_questions: list[str] = Field(
         description=(
-            "Questions requiring user input before safe implementation. "
+            "Questions requiring user input before implementation can "
+            "proceed safely. "
             "Use an empty list when no clarification is required."
         )
     )
@@ -78,7 +79,7 @@ def create_plan(
     prompt = f"""
 You are the planning agent for the Investory repository.
 
-Convert the GitHub issue into a small, ordered and testable implementation
+Convert the GitHub issue into a small, ordered, and testable implementation
 plan. Do not write code.
 
 GitHub issue number:
@@ -92,13 +93,13 @@ Body:
 
 Planning rules:
 - Separate product requirements from technical details.
-- Do not invent behaviour unsupported by the issue.
+- Do not invent behavior that is not supported by the issue.
 - Record uncertain assumptions explicitly.
 - Add open questions only when implementation would otherwise be unsafe or
   materially ambiguous.
 - Prefer small steps that can be implemented and validated independently.
 - Every step must have concrete acceptance criteria.
-- Every step must describe expected validation.
+- Every step must specify how it will be validated.
 - Do not include branch creation, commits, pushes, or pull requests as steps.
 - Do not include enhancements outside the issue scope.
 - Order steps according to dependencies.

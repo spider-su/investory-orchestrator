@@ -65,7 +65,7 @@ Instructions:
 - Do not access or print secrets.
 - Leave all edits in the current workspace.
 - Do not commit, push, or create a pull request.
-- The orchestrator runs complete validation separately.
+- The orchestrator runs the complete validation suite separately.
 
 Return a concise implementation summary.
 """.strip()
