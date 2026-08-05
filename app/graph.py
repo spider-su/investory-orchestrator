@@ -292,6 +292,13 @@ def coder_node(state: WorkflowState) -> dict:
     }
 
 
+def route_after_coder(state: WorkflowState) -> str:
+    if state["coder_error"]:
+        return "blocked"
+
+    return "run_validation"
+
+
 def route_after_environment(state: WorkflowState) -> str:
     if state["environment_ready"]:
         return "prepare_current_step"
@@ -513,7 +520,7 @@ def route_after_step_completion(state: WorkflowState) -> str:
 
 def workflow_complete_node(state: WorkflowState) -> dict:
     print("RESULT: ALL IMPLEMENTATION STEPS COMPLETED")
-    return {"workflow_status": "completed"}
+    return {}
 
 
 def push_branch_node(state: WorkflowState) -> dict:
@@ -577,6 +584,7 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
     print(pull_request.html_url)
 
     return {
+        "workflow_status": "completed",
         "pull_request_number": pull_request.number,
         "pull_request_url": pull_request.html_url,
     }
@@ -621,10 +629,21 @@ def blocked_node(state: WorkflowState) -> dict:
         f"{state['attempt']} validation attempts"
     )
 
-    output = state["coder_error"] or state["test_output"]
-    print(output[-4000:])
+    blocked_reason = (
+        state["blocked_reason"]
+        or state["coder_error"]
+        or state["review_error"]
+        or state["test_output"]
+        or state["error"]
+        or "Workflow blocked without a recorded reason."
+    )
 
-    return {}
+    print(blocked_reason[-4000:])
+
+    return {
+        "workflow_status": "blocked",
+        "blocked_reason": blocked_reason,
+    }
 
 
 def build_graph():
