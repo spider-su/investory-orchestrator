@@ -22,7 +22,9 @@ RUN apt-get update \
         docker-ce-cli \
         docker-buildx-plugin \
         docker-compose-plugin \
-    && npm install -g @devcontainers/cli \
+    && npm install -g \
+        @devcontainers/cli \
+        @openai/codex \
     && printf '#!/bin/sh\nexec docker compose "$@"\n' \
         > /usr/local/bin/docker-compose \
     && chmod +x /usr/local/bin/docker-compose \
@@ -30,6 +32,7 @@ RUN apt-get update \
     && docker compose version \
     && docker-compose version \
     && devcontainer --version \
+    && codex --version \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
