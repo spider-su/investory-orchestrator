@@ -242,6 +242,7 @@ def prepare_current_step_node(state: WorkflowState) -> dict:
         "review_markdown": "",
         "review_error": "",
         "blocked_reason": "",
+        "blocked_stage": "",
         "error": "",
     }
 
@@ -276,6 +277,7 @@ def coder_node(state: WorkflowState) -> dict:
             "coder_summary": "",
             "coder_error": message,
             "blocked_reason": message,
+            "blocked_stage": "coder",
             "error": message,
         }
 
@@ -288,6 +290,7 @@ def coder_node(state: WorkflowState) -> dict:
         "review_status": "not_started",
         "coder_summary": summary,
         "coder_error": "",
+        "blocked_stage": "",
         "error": "",
     }
 
@@ -339,6 +342,7 @@ def run_validation_node(state: WorkflowState) -> dict:
             if state["attempt"] >= state["max_attempts"]
             else ""
         ),
+        "blocked_stage": "coder",
         "error": "",
     }
 
@@ -371,7 +375,10 @@ def cleanup_node(state: WorkflowState) -> dict:
 def environment_failure_node(state: WorkflowState) -> dict:
     print("RESULT: ENVIRONMENT FAILURE")
     print(state["environment_output"][-4000:])
-    return {}
+    return {
+        "blocked_reason": state["environment_output"],
+        "blocked_stage": "environment",
+    }
 
 
 def project_validation_failure_node(
@@ -418,6 +425,8 @@ def reviewer_node(state: WorkflowState) -> dict:
             "review_markdown": "",
             "review_published": False,
             "review_error": message,
+            "blocked_reason": message,
+            "blocked_stage": "reviewer",
             "error": message,
         }
 
@@ -458,7 +467,12 @@ def publish_review_node(state: WorkflowState) -> dict:
 
     print("Review published to GitHub issue")
 
-    return {"review_published": True}
+    return {
+        "review_published": True,
+        "blocked_stage": (
+            "coder" if state["review_status"] == "changes_required" else ""
+        ),
+    }
 
 
 def route_after_reviewer(
@@ -545,12 +559,14 @@ def push_branch_node(state: WorkflowState) -> dict:
         return {
             "workflow_status": "blocked",
             "blocked_reason": message,
+            "blocked_stage": "push_branch",
             "error": message,
         }
 
     print(f"Pushed branch: {state['branch']}")
     return {
         "blocked_reason": "",
+        "blocked_stage": "",
         "error": "",
     }
 
@@ -617,6 +633,7 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
         return {
             "workflow_status": "blocked",
             "blocked_reason": message,
+            "blocked_stage": "create_draft_pr",
             "error": message,
         }
 
@@ -625,6 +642,7 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
         "pull_request_number": pull_request.number,
         "pull_request_url": pull_request.html_url,
         "blocked_reason": "",
+        "blocked_stage": "",
         "error": "",
     }
 
@@ -689,6 +707,7 @@ def blocked_node(state: WorkflowState) -> dict:
     return {
         "workflow_status": "blocked",
         "blocked_reason": blocked_reason,
+        "blocked_stage": state.get("blocked_stage", ""),
     }
 
 
@@ -840,7 +859,7 @@ def build_graph():
         },
     )
 
-    builder.add_edge("environment_failure", "cleanup")
+    builder.add_edge("environment_failure", "blocked")
     builder.add_edge("workflow_complete", "push_branch")
     builder.add_conditional_edges(
         "push_branch",
@@ -932,6 +951,7 @@ def main() -> None:
         "ci_url": "",
         "ci_output": "",
         "blocked_reason": "",
+        "blocked_stage": "",
         "error": "",
     }
 
@@ -960,16 +980,49 @@ def main() -> None:
                 f"Current status: {workflow_status}"
             )
 
+        blocked_stage = saved_state.get("blocked_stage", "")
+        resume_from = {
+            "environment": "prepare_workspace",
+            "coder": "prepare_current_step",
+            "reviewer": "run_validation",
+            "push_branch": "workflow_complete",
+            "create_draft_pr": "push_branch",
+        }.get(blocked_stage)
+
+        if resume_from is None:
+            raise RuntimeError(
+                "Blocked workflow does not contain a resumable stage. "
+                f"Blocked stage: {blocked_stage or 'missing'}"
+            )
+
+        configured_max_attempts = int(
+            os.getenv(
+                "MAX_ATTEMPTS",
+                str(saved_state["max_attempts"]),
+            )
+        )
+
+        if (
+            blocked_stage == "coder"
+            and saved_state["attempt"] >= configured_max_attempts
+        ):
+            raise RuntimeError(
+                "Retry limit is exhausted. Increase MAX_ATTEMPTS "
+                f"above {saved_state['attempt']} before resuming."
+            )
+
         graph.update_state(
             config,
             {
                 "workflow_status": "implementing",
+                "max_attempts": configured_max_attempts,
                 "blocked_reason": "",
+                "blocked_stage": "",
                 "coder_error": "",
                 "review_error": "",
                 "error": "",
             },
-            as_node="prepare_current_step",
+            as_node=resume_from,
         )
         graph.invoke(None, config=config)
         return

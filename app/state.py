@@ -28,6 +28,15 @@ ReviewStatus = Literal[
     "review_failure",
 ]
 
+BlockedStage = Literal[
+    "",
+    "environment",
+    "coder",
+    "reviewer",
+    "push_branch",
+    "create_draft_pr",
+]
+
 CiStatus = Literal[
     "not_started",
     "queued",
@@ -88,4 +97,5 @@ class WorkflowState(TypedDict):
     ci_output: str
 
     blocked_reason: str
+    blocked_stage: BlockedStage
     error: str
