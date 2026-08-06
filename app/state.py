@@ -1,49 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Optional, TypedDict
+
+from typing_extensions import TypeAlias
 
 
-WorkflowStatus = Literal[
-    "new",
-    "planning",
-    "implementing",
-    "validating",
-    "reviewing",
-    "blocked",
-    "waiting_ci",
-    "completed",
-]
-
-ValidationStatus = Literal[
-    "not_started",
-    "environment_failure",
-    "project_validation_failure",
-    "validation_success",
-]
-
-ReviewStatus = Literal[
-    "not_started",
-    "approved",
-    "changes_required",
-    "review_failure",
-]
-
-BlockedStage = Literal[
-    "",
-    "environment",
-    "coder",
-    "reviewer",
-    "push_branch",
-    "create_draft_pr",
-]
-
-CiStatus = Literal[
-    "not_started",
-    "queued",
-    "in_progress",
-    "success",
-    "failure",
-]
+WorkflowStatus: TypeAlias = str
+ValidationStatus: TypeAlias = str
+ReviewStatus: TypeAlias = str
+BlockedStage: TypeAlias = str
+CiStatus: TypeAlias = str
 
 
 class WorkflowState(TypedDict):

@@ -149,3 +149,49 @@ def _representative_tests(
 
     return sorted(candidates)[:count]
 
+
+def collect_repository_context(workspace: Path) -> str:
+    sections: list[str] = []
+
+    sections.extend(
+        [
+            "# Repository snapshot",
+            "",
+            "## Top-level tree",
+            _top_level_tree(workspace),
+        ]
+    )
+
+    for file_name in CONTEXT_FILES:
+        path = workspace / file_name
+        if not path.exists() or not path.is_file():
+            continue
+
+        sections.extend(
+            [
+                "",
+                f"## {file_name}",
+                _read_text(path),
+            ]
+        )
+
+    packages = _java_packages(workspace)
+    if packages:
+        sections.extend(["", "## Java packages"])
+        sections.extend(f"- {package}" for package in packages)
+
+    representative_tests = _representative_tests(workspace)
+    if representative_tests:
+        sections.extend(["", "## Representative tests"])
+        sections.extend(
+            f"- {path.relative_to(workspace).as_posix()}"
+            for path in representative_tests
+        )
+
+    context = "\n".join(sections).strip()
+    if context:
+        return context
+
+    return "Repository context is unavailable for this workspace."
+
+

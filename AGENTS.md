@@ -5,7 +5,7 @@ This document defines how AI agents should work in this repository.
 ## General Principles
 
 - Keep changes small.
-- Prefer correctness over completeness.
+- Prefer correctness to completeness.
 - Never modify unrelated code.
 - Follow existing project conventions.
 - Produce deterministic results whenever possible.
@@ -150,7 +150,7 @@ The orchestrator:
 - Use descriptive names.
 - Avoid unnecessary abstractions.
 - Keep functions focused.
-- Prefer explicit code over clever code.
+- Prefer explicit code to clever code.
 
 ---
 

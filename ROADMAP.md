@@ -146,7 +146,7 @@ agent/issue-<number>
 ```
 
 - Reuse an existing open PR for the same branch.
-- Otherwise create a draft PR to `main`.
+- Otherwise, create a draft PR to `main`.
 - Include:
   - issue reference
   - plan summary
