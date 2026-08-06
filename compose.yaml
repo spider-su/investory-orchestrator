@@ -9,7 +9,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./data:/app/data
-      - ${HOST_WORKSPACES_DIR}:${HOST_WORKSPACES_DIR}
+      - ${HOST_WORKSPACES_DIR:-./workspaces}:/app/workspaces
       - /var/run/docker.sock:/var/run/docker.sock
 
     secrets:
