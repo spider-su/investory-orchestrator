@@ -1,19 +1,51 @@
 # Investory Orchestrator Roadmap
 
-## Current MVP Scope
+## Capability Status
 
-The MVP is complete when the orchestrator can:
+This table is the only authoritative project-status record in this document.
 
-1. Read a GitHub issue.
-2. Produce a structured implementation plan.
-3. Execute the plan step by step.
-4. Let the coder retry after validation or review failures.
-5. Create local checkpoint commits and push one final logical commit.
-6. Resume a blocked workflow from its checkpoint.
-7. Push the issue branch.
-8. Create or update a draft pull request.
+| Capability | Implemented | Tested E2E | Production-ready |
+| --- | --- | --- | --- |
+| GitHub issue loading | Yes | No | No |
+| Repository-aware structured planning | Yes | No | No |
+| Isolated issue workspace and branch | Yes | No | No |
+| Dev Container startup and validation | Yes | No | No |
+| Multi-step execution | Yes | No | No |
+| Validation repair loop | Yes | No | No |
+| Reviewer repair loop | Yes | No | No |
+| Retry exhaustion and blocked state | Yes | No | No |
+| Local checkpoint commits | Yes | No | No |
+| Final logical history rewrite | Yes | No | No |
+| Stage-aware resume | Yes | No | No |
+| Issue branch push | Yes | No | No |
+| Draft PR creation or update | Yes | No | No |
+| Automatic issue-contract validation | No | No | No |
+| Graph and routing test coverage | No | No | No |
+| GitHub Actions independent validation | No | No | No |
+| Pluggable agent backends | No | No | No |
+| Sequential `agent-ready` queue | No | No | No |
 
-## Remaining MVP Work
+Status definitions:
+
+- **Implemented**: the capability has an executable code path in the current
+  repository.
+- **Tested E2E**: repeatable end-to-end tests have passed without manual
+  repository repair.
+- **Production-ready**: the capability has sufficient independent validation,
+  recovery behavior, and operational coverage for unattended use.
+
+The MVP is complete when every capability from **GitHub issue loading** through
+**Draft PR creation or update** is marked `Yes` for both **Implemented** and
+**Tested E2E**. Production readiness is tracked separately.
+
+Update this table only when implementation or verification evidence changes.
+Do not add separate completion checklists or duplicate status summaries.
+
+## Implemented MVP Capability Specifications
+
+The sections below describe implemented MVP behavior. They are retained as
+acceptance specifications, not as project-status tracking. Verification status
+is maintained only in the capability table above.
 
 ### 1. Multi-step execution
 
@@ -233,22 +265,11 @@ Before declaring MVP complete, run these scenarios.
 
 ---
 
-## Current Status and Revised Priorities
+## Priorities
 
-The core issue-to-PR workflow is implemented:
-
-- repository-aware planning
-- isolated issue workspaces
-- Dev Container startup and validation
-- multi-step implementation
-- validation and review retries
-- per-step commits
-- stage-aware checkpoints and resume
-- branch push
-- draft pull request creation or update
-
-The remaining work is focused on proving the workflow with real issues,
-simplifying agent integrations, and making unattended operation reliable.
+Status is maintained only in the Capability Status table. Current work should
+move the core MVP capabilities from `Tested E2E: No` to `Yes`, then address the
+production-readiness gaps.
 
 ### Priority 1 — Prove and stabilize the MVP
 
@@ -484,21 +505,4 @@ Then add, in order:
 9. Add scheduled polling.
 10. Add webhooks.
 11. Consider dependency-aware or parallel execution.
-
-## MVP Completion Checklist
-
-- [ ] Planner output is normalized into executable steps.
-- [ ] Each step runs independently.
-- [ ] Validation failures retry through the coder.
-- [ ] Review failures retry through the coder.
-- [ ] Retry limits are enforced.
-- [ ] Each approved step creates a local checkpoint commit.
-- [ ] Final checkpoint history is rewritten into one logical commit before push.
-- [ ] Only the final logical commit is pushed to the issue branch.
-- [ ] Blocked workflows preserve workspace and checkpoint.
-- [ ] `--resume` continues the same workflow.
-- [ ] Final branch is pushed.
-- [ ] Draft PR is created or updated.
-- [ ] All six MVP verification scenarios pass.
-- [x] Planner output is normalized into executable steps.
 
