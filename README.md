@@ -314,6 +314,108 @@ For every plan step:
 
 The retry count is bounded by `MAX_ATTEMPTS`.
 
+### Retry semantics
+
+Retries are scoped to the current implementation step. `MAX_ATTEMPTS` is a
+per-step limit, shared by validation and review repair loops.
+
+One implementation attempt means:
+
+```text
+coder produces a candidate
+→ deterministic validation
+→ automated review when validation succeeds
+```
+
+The attempt is consumed once the coder has produced a candidate. A validation
+failure and a reviewer request for changes both consume the same attempt; they
+do not maintain separate counters.
+
+Infrastructure failures should block the workflow without consuming an
+implementation attempt. Examples include:
+
+- the coding backend cannot start
+- authentication or usage quota is unavailable
+- the Dev Container cannot start
+- the reviewer service is unavailable
+- the coder times out before producing a candidate
+
+#### Required workspace isolation
+
+Every step must establish a baseline at the last approved commit:
+
+```text
+step baseline = HEAD when the step starts
+```
+
+Every retry must start from that baseline rather than editing the previous
+failed candidate in place:
+
+```text
+step baseline
+→ coder attempt
+→ validation
+→ review
+├── approved
+│   → commit the step
+└── failed
+    → preserve failed patch and diagnostics
+    → reset workspace to the step baseline
+    → start the next attempt
+```
+
+The next attempt receives the failed patch, validation output, and reviewer
+findings as read-only diagnostic context. Failed source changes must not remain
+in the working tree.
+
+Before resetting, the orchestrator should preserve:
+
+- the complete patch, including untracked files
+- coder summary
+- validation command, exit code, and output
+- reviewer findings when review ran
+- failure stage
+- attempt number
+
+Suggested artifact layout:
+
+```text
+runs/
+└── issue-<number>/
+    └── <step-id>/
+        ├── attempt-1.patch
+        ├── attempt-1-summary.txt
+        ├── attempt-1-validation.txt
+        └── attempt-1-review.json
+```
+
+After artifact preservation succeeds, the reset should be equivalent to:
+
+```bash
+git reset --hard <step-baseline-sha>
+git clean -fd
+```
+
+The retry must remain constrained to:
+
+- the same issue
+- the same current plan step
+- the original acceptance criteria
+- the declared scope and change constraints
+- the affected areas identified by the plan, unless broader changes are
+  explicitly justified
+
+A failed attempt is diagnostic input, not permission to broaden the solution.
+
+#### Current implementation status
+
+The current implementation still lets the coder edit the accumulated
+uncommitted diff after validation or review failure. Failed-attempt patch
+archival and reset-to-baseline isolation are not implemented yet.
+
+Until retry isolation is implemented, failed attempts can contaminate later
+attempts. This must be resolved before enabling unattended queue execution.
+
 ### Completion phase
 
 After all steps are approved:
