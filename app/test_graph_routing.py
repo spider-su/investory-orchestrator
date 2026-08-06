@@ -6,8 +6,15 @@ from app.graph import (
     route_after_coder,
     route_after_create_draft_pr,
     route_after_environment,
+    route_after_failed_attempt,
+    route_after_final_failed_attempt,
+    route_after_final_integration_coder,
+    route_after_final_reviewer,
+    route_after_final_validation,
+    route_after_finalize_history,
     route_after_plan_publication,
     route_after_planner,
+    route_after_prepare_final_review,
     route_after_push_branch,
     route_after_review_publication,
     route_after_reviewer,
@@ -34,7 +41,7 @@ class GraphRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             route_after_plan_publication({"requires_user_input": False}),
-            "prepare_workspace",
+            "start_environment",
         )
 
     def test_route_after_coder(self) -> None:
@@ -60,31 +67,33 @@ class GraphRoutingTests(unittest.TestCase):
     def test_route_after_validation(self) -> None:
         self.assertEqual(
             route_after_validation(
-                {
-                    "validation_status": "validation_success",
-                    "attempt": 1,
-                    "max_attempts": 3,
-                }
+                {"validation_status": "validation_success"}
             ),
             "reviewer",
         )
         self.assertEqual(
             route_after_validation(
-                {
-                    "validation_status": "project_validation_failure",
-                    "attempt": 1,
-                    "max_attempts": 3,
-                }
+                {"validation_status": "project_validation_failure"}
+            ),
+            "isolate_validation_failure",
+        )
+
+    def test_route_after_failed_attempt(self) -> None:
+        self.assertEqual(
+            route_after_failed_attempt(
+                {"error": "isolation failed", "attempt": 1, "max_attempts": 3}
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_failed_attempt(
+                {"error": "", "attempt": 1, "max_attempts": 3}
             ),
             "coder",
         )
         self.assertEqual(
-            route_after_validation(
-                {
-                    "validation_status": "project_validation_failure",
-                    "attempt": 3,
-                    "max_attempts": 3,
-                }
+            route_after_failed_attempt(
+                {"error": "", "attempt": 3, "max_attempts": 3}
             ),
             "blocked",
         )
@@ -101,34 +110,14 @@ class GraphRoutingTests(unittest.TestCase):
 
     def test_route_after_review_publication(self) -> None:
         self.assertEqual(
-            route_after_review_publication(
-                {
-                    "review_status": "approved",
-                    "attempt": 1,
-                    "max_attempts": 3,
-                }
-            ),
+            route_after_review_publication({"review_status": "approved"}),
             "complete_step",
         )
         self.assertEqual(
             route_after_review_publication(
-                {
-                    "review_status": "changes_required",
-                    "attempt": 1,
-                    "max_attempts": 3,
-                }
+                {"review_status": "changes_required"}
             ),
-            "coder",
-        )
-        self.assertEqual(
-            route_after_review_publication(
-                {
-                    "review_status": "changes_required",
-                    "attempt": 3,
-                    "max_attempts": 3,
-                }
-            ),
-            "blocked",
+            "isolate_review_failure",
         )
 
     def test_route_after_step_completion(self) -> None:
@@ -142,6 +131,127 @@ class GraphRoutingTests(unittest.TestCase):
             route_after_step_completion(
                 {"current_step": 1, "steps": [{"id": "step-1"}]}
             ),
+            "prepare_final_review",
+        )
+
+    def test_route_after_prepare_final_review(self) -> None:
+        self.assertEqual(
+            route_after_prepare_final_review(
+                {"workflow_status": "blocked"}
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_prepare_final_review(
+                {"workflow_status": "validating"}
+            ),
+            "final_validation",
+        )
+
+    def test_route_after_final_validation(self) -> None:
+        self.assertEqual(
+            route_after_final_validation(
+                {
+                    "final_validation_status": "validation_success",
+                    "final_attempt": 0,
+                }
+            ),
+            "final_reviewer",
+        )
+        self.assertEqual(
+            route_after_final_validation(
+                {
+                    "final_validation_status": "project_validation_failure",
+                    "final_attempt": 0,
+                }
+            ),
+            "final_integration_coder",
+        )
+        self.assertEqual(
+            route_after_final_validation(
+                {
+                    "final_validation_status": "project_validation_failure",
+                    "final_attempt": 1,
+                }
+            ),
+            "isolate_final_validation_failure",
+        )
+
+    def test_route_after_final_integration_coder(self) -> None:
+        self.assertEqual(
+            route_after_final_integration_coder(
+                {"coder_error": "repair failed"}
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_final_integration_coder({"coder_error": ""}),
+            "final_validation",
+        )
+
+    def test_route_after_final_reviewer(self) -> None:
+        self.assertEqual(
+            route_after_final_reviewer(
+                {"final_review_status": "review_failure", "final_attempt": 0}
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_final_reviewer(
+                {"final_review_status": "approved", "final_attempt": 0}
+            ),
+            "finalize_history",
+        )
+        self.assertEqual(
+            route_after_final_reviewer(
+                {
+                    "final_review_status": "changes_required",
+                    "final_attempt": 0,
+                }
+            ),
+            "final_integration_coder",
+        )
+        self.assertEqual(
+            route_after_final_reviewer(
+                {
+                    "final_review_status": "changes_required",
+                    "final_attempt": 1,
+                }
+            ),
+            "isolate_final_review_failure",
+        )
+
+    def test_route_after_final_failed_attempt(self) -> None:
+        self.assertEqual(
+            route_after_final_failed_attempt(
+                {
+                    "error": "isolation failed",
+                    "final_attempt": 1,
+                    "max_final_attempts": 3,
+                }
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_final_failed_attempt(
+                {"error": "", "final_attempt": 1, "max_final_attempts": 3}
+            ),
+            "final_integration_coder",
+        )
+        self.assertEqual(
+            route_after_final_failed_attempt(
+                {"error": "", "final_attempt": 3, "max_final_attempts": 3}
+            ),
+            "blocked",
+        )
+
+    def test_route_after_finalize_history(self) -> None:
+        self.assertEqual(
+            route_after_finalize_history({"workflow_status": "blocked"}),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_finalize_history({"workflow_status": "reviewing"}),
             "workflow_complete",
         )
 

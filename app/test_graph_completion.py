@@ -29,8 +29,10 @@ def build_state() -> dict:
             },
         ],
         "plan": {"summary": "Add agent test coverage."},
+        "final_commit_sha": "abc123",
         "workflow_status": "implementing",
         "blocked_reason": "",
+        "blocked_stage": "",
         "error": "",
     }
 
@@ -109,7 +111,14 @@ class GraphCompletionTests(unittest.TestCase):
                 result = push_branch_node(build_state())
 
         push_branch_mock.assert_called_once()
-        self.assertEqual(result, {"blocked_reason": "", "error": ""})
+        self.assertEqual(
+            result,
+            {
+                "blocked_reason": "",
+                "blocked_stage": "",
+                "error": "",
+            },
+        )
 
     def test_push_branch_node_blocks_on_runtime_error(self) -> None:
         with patch("app.graph.GitHubAppClient", return_value=object()):
@@ -124,6 +133,7 @@ class GraphCompletionTests(unittest.TestCase):
             {
                 "workflow_status": "blocked",
                 "blocked_reason": "push failed",
+                "blocked_stage": "push_branch",
                 "error": "push failed",
             },
         )
@@ -140,6 +150,7 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertEqual(created["base"], "main")
         self.assertIn("Closes #42", created["body"])
         self.assertIn("- [x] step-01: Add agent tests", created["body"])
+        self.assertIn("Final commit: `abc123`", created["body"])
         self.assertEqual(
             result,
             {
@@ -147,6 +158,7 @@ class GraphCompletionTests(unittest.TestCase):
                 "pull_request_number": 7,
                 "pull_request_url": "https://example/pr/7",
                 "blocked_reason": "",
+                "blocked_stage": "",
                 "error": "",
             },
         )
@@ -180,6 +192,7 @@ class GraphCompletionTests(unittest.TestCase):
             {
                 "workflow_status": "blocked",
                 "blocked_reason": "GitHub API failed",
+                "blocked_stage": "create_draft_pr",
                 "error": "GitHub API failed",
             },
         )
