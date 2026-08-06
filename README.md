@@ -14,7 +14,7 @@ The orchestrator coordinates specialized agents that:
 8. Push changes and create a draft pull request.
 
 ## Workflow
-Investory Orchestrator turns a prepared GitHub issue into a validated draft pull
+Investory Orchestrator turns an agent-ready GitHub issue into a validated draft pull
 request. It is a workflow and policy layer around coding agents, Git, GitHub,
 Dev Containers, and project validation.
 
@@ -105,6 +105,166 @@ python -m app.graph --issue 18
 
 The orchestrator does not merge pull requests automatically. Human review remains
 the final approval step.
+
+## Agent-ready issue contract
+
+The workflow depends on the issue defining the product outcome clearly enough
+that the planner does not need to act as a product manager.
+
+An issue is considered **agent-ready** only when it contains the required
+sections below and all material product decisions have already been made.
+
+The current implementation still relies on the operator to enforce this
+contract before starting a run. Automatic issue-contract validation and
+rejection are planned and should run immediately after loading the issue,
+before creating a workspace or invoking the planner.
+
+### Required issue structure
+
+```markdown
+## Goal
+
+Describe the observable product outcome.
+
+## Context
+
+Explain why the change is needed and describe relevant existing behavior.
+
+## Product decisions
+
+State product, business, compatibility, and UX decisions that the agent must
+not make independently.
+
+- Intended user behavior:
+- Compatibility expectations:
+- Business or UX rules:
+
+## Scope
+
+### In scope
+
+- ...
+
+### Out of scope
+
+- ...
+
+## Acceptance criteria
+
+- [ ] Observable and testable result
+- [ ] Observable and testable result
+
+## Validation
+
+- Expected automated tests:
+- Required manual checks:
+- Existing validation that must remain passing:
+
+## Change constraints
+
+- Database migration allowed: yes/no
+- Breaking API change allowed: yes/no
+- Dependency changes allowed: yes/no
+- Configuration changes allowed: yes/no
+
+## Implementation notes
+
+Optional technical guidance. The agent may choose another implementation when
+it satisfies the product decisions, scope, constraints, and acceptance
+criteria.
+```
+
+### Additional requirements for bugs
+
+Bug issues must also define:
+
+```markdown
+## Reproduction
+
+1. ...
+2. ...
+
+## Current behavior
+
+Describe what happens now.
+
+## Expected behavior
+
+Describe what should happen instead.
+```
+
+Reproduction steps may be replaced by a deterministic failing test when that is
+the clearest and most reliable reproduction.
+
+### Contract rules
+
+The issue author owns product intent. The agents own implementation within the
+declared constraints.
+
+The following information is mandatory:
+
+- a specific, observable goal
+- explicit in-scope and out-of-scope boundaries
+- testable acceptance criteria
+- expected validation or test coverage
+- permission or prohibition for migrations
+- permission or prohibition for breaking changes
+- permission or prohibition for dependency and configuration changes
+- reproduction, current behavior, and expected behavior for bugs
+
+Implementation details are optional unless they represent a required
+architectural or compatibility decision.
+
+Examples of product decisions:
+
+- whether an existing API must remain backward compatible
+- which user-visible behavior is correct
+- whether historical data must be migrated
+- whether an operation should fail or degrade gracefully
+- which roles or users may access a capability
+
+Examples of implementation details:
+
+- class names
+- helper method structure
+- internal package placement when repository conventions already define it
+- choice between equivalent internal algorithms
+
+### Rejection conditions
+
+An issue should not be executed when:
+
+- the goal is absent, vague, or only says to improve, fix, or test something
+- acceptance criteria are missing or cannot be observed
+- scope boundaries are missing
+- a required product decision is delegated to the planner or coder
+- change permissions are unspecified
+- a bug cannot be reproduced and has no deterministic failing test
+- the body contains unresolved placeholders such as `TBD`
+- requirements contradict each other
+
+The expected preflight flow is:
+
+```text
+load issue
+→ validate issue contract
+├── invalid → stop and report missing or conflicting fields
+└── valid
+    → prepare workspace
+    → collect repository context
+    → planner
+```
+
+The future queue runner must require both:
+
+```text
+agent-ready label
+AND
+valid issue contract
+```
+
+The label is human approval to execute the issue. It must not bypass contract
+validation.
 
 ## Command line
 
