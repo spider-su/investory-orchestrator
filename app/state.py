@@ -35,6 +35,9 @@ class WorkflowState(TypedDict):
 
     attempt: int
     max_attempts: int
+    step_baseline_sha: str
+    attempt_artifacts: list[dict[str, Any]]
+    last_failed_patch_path: str
 
     coder_summary: str
     coder_error: str

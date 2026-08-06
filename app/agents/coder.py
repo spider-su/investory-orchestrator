@@ -27,6 +27,26 @@ def _git_diff(workspace: Path) -> str:
     return result.stdout
 
 
+def _read_failed_patch(path: str, *, limit: int = 20_000) -> str:
+    if not path:
+        return "No previous failed attempt patch."
+
+    patch_path = Path(path)
+
+    try:
+        patch = patch_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        return f"Unable to read failed patch at {path}: {error}"
+
+    if len(patch) <= limit:
+        return patch or "Previous failed attempt produced an empty patch."
+
+    return patch[:limit] + "\n... <failed patch truncated>"
+
+
 def run_coder(
     *,
     workspace: Path,
@@ -38,6 +58,7 @@ def run_coder(
     review_feedback: dict,
     attempt: int,
     max_attempts: int,
+    failed_patch_path: str,
 ) -> str:
     prompt = f"""
 Implement GitHub issue #{issue_number} in the current repository.
@@ -62,6 +83,11 @@ Reviewer feedback:
 
 Current git diff:
 {_git_diff(workspace) or "No uncommitted changes."}
+
+Previous failed attempt patch (diagnostic context only):
+{_read_failed_patch(failed_patch_path)}
+
+Do not reapply the failed patch blindly. Produce a fresh candidate from the clean step baseline.
 
 Instructions:
 - Inspect AGENTS.md and repository documentation before editing.

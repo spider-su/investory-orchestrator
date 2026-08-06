@@ -21,6 +21,12 @@ from app.agents.reviewer import (
 )
 from app.github_client import GitHubAppClient
 from app.repository_context import collect_repository_context
+from app.retry_isolation import (
+    RetryIsolationError,
+    archive_and_reset_failed_attempt,
+    current_head,
+    workspace_has_changes,
+)
 from app.state import WorkflowState
 from app.test_runner import (
     run_validation,
@@ -237,6 +243,29 @@ def prepare_current_step_node(state: WorkflowState) -> dict:
     steps[index]["status"] = "in_progress"
     step = steps[index]
 
+    workspace = Path(state["workspace"])
+    baseline_sha = current_head(workspace)
+    attempt_artifacts = list(state.get("attempt_artifacts", []))
+
+    if workspace_has_changes(workspace):
+        artifact = archive_and_reset_failed_attempt(
+            workspace=workspace,
+            issue_number=state["issue_number"],
+            step_id=step["id"],
+            attempt=0,
+            failure_stage="pre-step-workspace",
+            baseline_sha=baseline_sha,
+            coder_summary="Uncommitted changes existed before the step started.",
+            validation_output="",
+            validation_exit_code=0,
+            review={},
+        )
+        attempt_artifacts.append(artifact)
+        print(
+            "Archived and removed pre-existing workspace changes: "
+            f"{artifact['patch_path']}"
+        )
+
     print(
         f"Starting step {index + 1}/{len(steps)}: "
         f"{step['id']} — {step['title']}"
@@ -246,6 +275,9 @@ def prepare_current_step_node(state: WorkflowState) -> dict:
         "workflow_status": "implementing",
         "steps": steps,
         "attempt": 0,
+        "step_baseline_sha": baseline_sha,
+        "attempt_artifacts": attempt_artifacts,
+        "last_failed_patch_path": "",
         "coder_summary": "",
         "coder_error": "",
         "validation_status": "not_started",
@@ -282,15 +314,51 @@ def coder_node(state: WorkflowState) -> dict:
             review_feedback=state["review"],
             attempt=next_attempt,
             max_attempts=state["max_attempts"],
+            failed_patch_path=state.get("last_failed_patch_path", ""),
         )
     except CoderError as error:
         message = str(error)
         print("Coder failed")
         print(message[-4000:])
 
+        artifacts = list(state.get("attempt_artifacts", []))
+        last_failed_patch_path = state.get(
+            "last_failed_patch_path",
+            "",
+        )
+        workspace = Path(state["workspace"])
+
+        if workspace_has_changes(workspace):
+            try:
+                artifact = archive_and_reset_failed_attempt(
+                    workspace=workspace,
+                    issue_number=state["issue_number"],
+                    step_id=step["id"],
+                    attempt=next_attempt,
+                    failure_stage="coder",
+                    baseline_sha=(
+                        state.get("step_baseline_sha")
+                        or current_head(workspace)
+                    ),
+                    coder_summary="",
+                    validation_output="",
+                    validation_exit_code=0,
+                    review={},
+                )
+                artifacts.append(artifact)
+                last_failed_patch_path = artifact["patch_path"]
+            except RetryIsolationError as isolation_error:
+                message = (
+                    f"{message}\n\n"
+                    "Failed to isolate partial coder changes:\n"
+                    f"{isolation_error}"
+                )
+
         return {
             "coder_summary": "",
             "coder_error": message,
+            "attempt_artifacts": artifacts,
+            "last_failed_patch_path": last_failed_patch_path,
             "blocked_reason": message,
             "blocked_stage": "coder",
             "error": message,
@@ -365,6 +433,97 @@ def run_validation_node(state: WorkflowState) -> dict:
 def route_after_validation(state: WorkflowState) -> str:
     if state["validation_status"] == "validation_success":
         return "reviewer"
+
+    return "isolate_validation_failure"
+
+
+def _isolate_failed_attempt(
+    state: WorkflowState,
+    *,
+    failure_stage: str,
+) -> dict:
+    workspace = Path(state["workspace"])
+    step = state["steps"][state["current_step"]]
+    baseline_sha = (
+        state.get("step_baseline_sha")
+        or current_head(workspace)
+    )
+
+    try:
+        artifact = archive_and_reset_failed_attempt(
+            workspace=workspace,
+            issue_number=state["issue_number"],
+            step_id=step["id"],
+            attempt=state["attempt"],
+            failure_stage=failure_stage,
+            baseline_sha=baseline_sha,
+            coder_summary=state["coder_summary"],
+            validation_output=state["test_output"],
+            validation_exit_code=state["validation_exit_code"],
+            review=state["review"],
+        )
+    except RetryIsolationError as error:
+        message = (
+            "Failed to preserve and reset the failed attempt. "
+            "The workspace was not intentionally discarded.\n"
+            f"{error}"
+        )
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "coder",
+            "error": message,
+        }
+
+    print(
+        f"Archived failed {failure_stage} attempt: "
+        f"{artifact['patch_path']}"
+    )
+    print(f"Workspace reset to step baseline {baseline_sha}")
+
+    exhausted = state["attempt"] >= state["max_attempts"]
+    reason = ""
+
+    if exhausted:
+        reason = (
+            f"{failure_stage.capitalize()} failed after "
+            f"{state['attempt']} implementation attempts. "
+            f"Last failed patch: {artifact['patch_path']}"
+        )
+
+    return {
+        "attempt_artifacts": [
+            *state.get("attempt_artifacts", []),
+            artifact,
+        ],
+        "last_failed_patch_path": artifact["patch_path"],
+        "blocked_reason": reason,
+        "blocked_stage": "coder" if exhausted else "",
+        "error": "",
+    }
+
+
+def isolate_validation_failure_node(
+    state: WorkflowState,
+) -> dict:
+    return _isolate_failed_attempt(
+        state,
+        failure_stage="validation",
+    )
+
+
+def isolate_review_failure_node(
+    state: WorkflowState,
+) -> dict:
+    return _isolate_failed_attempt(
+        state,
+        failure_stage="review",
+    )
+
+
+def route_after_failed_attempt(state: WorkflowState) -> str:
+    if state["error"]:
+        return "blocked"
 
     if state["attempt"] < state["max_attempts"]:
         return "coder"
@@ -505,10 +664,7 @@ def route_after_review_publication(
     if state["review_status"] == "approved":
         return "complete_step"
 
-    if state["attempt"] < state["max_attempts"]:
-        return "coder"
-
-    return "blocked"
+    return "isolate_review_failure"
 
 
 def complete_step_node(state: WorkflowState) -> dict:
@@ -541,6 +697,8 @@ def complete_step_node(state: WorkflowState) -> dict:
         ],
         "current_step": index + 1,
         "attempt": 0,
+        "step_baseline_sha": "",
+        "last_failed_patch_path": "",
         "commit_sha": commit_sha,
     }
 
@@ -765,6 +923,14 @@ def build_graph():
         run_validation_node,
     )
     builder.add_node(
+        "isolate_validation_failure",
+        isolate_validation_failure_node,
+    )
+    builder.add_node(
+        "isolate_review_failure",
+        isolate_review_failure_node,
+    )
+    builder.add_node(
         "environment_failure",
         environment_failure_node,
     )
@@ -839,14 +1005,23 @@ def build_graph():
             "blocked": "blocked",
         },
     )
+    builder.add_conditional_edges(
+        "isolate_validation_failure",
+        route_after_failed_attempt,
+        {
+            "coder": "coder",
+            "blocked": "blocked",
+        },
+    )
 
     builder.add_conditional_edges(
         "run_validation",
         route_after_validation,
         {
             "reviewer": "reviewer",
-            "coder": "coder",
-            "blocked": "blocked",
+            "isolate_validation_failure": (
+                "isolate_validation_failure"
+            ),
         },
     )
 
@@ -858,14 +1033,23 @@ def build_graph():
             "blocked": "blocked",
         },
     )
+    builder.add_conditional_edges(
+        "isolate_review_failure",
+        route_after_failed_attempt,
+        {
+            "coder": "coder",
+            "blocked": "blocked",
+        },
+    )
 
     builder.add_conditional_edges(
         "publish_review",
         route_after_review_publication,
         {
             "complete_step": "complete_step",
-            "coder": "coder",
-            "blocked": "blocked",
+            "isolate_review_failure": (
+                "isolate_review_failure"
+            ),
         },
     )
 
@@ -950,6 +1134,9 @@ def main() -> None:
         "max_attempts": int(
             os.getenv("MAX_ATTEMPTS", "3")
         ),
+        "step_baseline_sha": "",
+        "attempt_artifacts": [],
+        "last_failed_patch_path": "",
         "environment_output": "",
         "environment_ready": False,
         "validation_status": "not_started",
