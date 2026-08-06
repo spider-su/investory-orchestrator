@@ -8,7 +8,7 @@ The MVP is complete when the orchestrator can:
 2. Produce a structured implementation plan.
 3. Execute the plan step by step.
 4. Let the coder retry after validation or review failures.
-5. Commit each completed step.
+5. Create local checkpoint commits and push one final logical commit.
 6. Resume a blocked workflow from its checkpoint.
 7. Push the issue branch.
 8. Create or update a draft pull request.
@@ -63,30 +63,51 @@ Allow the coder to fix validation and review failures.
 
 ---
 
-### 3. Step commits
+### 3. Checkpoint commits and final logical history
 
 **Goal**
 
-Create one commit for every approved implementation step.
+Create a local checkpoint commit for every approved implementation step, then
+replace the checkpoint history with one final logical commit before pushing the
+issue branch.
+
+Checkpoint commits are recovery boundaries only. They remain local and are not
+part of the pull request history.
 
 **Required**
 
 - Stage all files after reviewer approval.
-- Commit with:
+- Create a local checkpoint commit with:
 
 ```text
 Complete <step-id>: <step title>
 ```
 
-- Save the commit SHA in the step state.
+- Save the checkpoint commit SHA in the step state.
 - Do not commit failed or unreviewed work.
 - Handle steps that require no file changes.
+- After all steps pass final validation and whole-plan review:
+  - reset softly to the original issue baseline
+  - stage the complete final diff
+  - create one logical commit with:
+
+```text
+Implement #<issue-number>: <issue-title>
+```
+
+- Push only the final logical commit to the issue branch.
+- Preserve checkpoint SHAs and attempt artifacts in workflow state for
+  diagnostics.
 
 **Done when**
 
-- Git history contains one commit per completed step.
-- Each step stores its commit SHA.
-- No automatic commit is created before approval.
+- Every approved step creates a local checkpoint commit.
+- Each completed step stores its checkpoint SHA.
+- Failed or unreviewed work is never committed.
+- Final validation runs against the complete implementation.
+- The pushed branch contains one logical commit relative to the issue baseline.
+- Local checkpoint commits are no longer reachable from the pushed issue
+  branch.
 
 ---
 
@@ -171,8 +192,10 @@ Before declaring MVP complete, run these scenarios.
 
 - Issue contains two or more clear steps.
 - All coder changes pass on the first attempt.
-- Each step is committed.
-- Branch is pushed.
+- Each approved step creates a local checkpoint commit.
+- Final whole-plan validation and review pass.
+- Checkpoint history is rewritten into one logical commit.
+- Only the final logical commit is pushed.
 - Draft PR is created.
 
 ### Scenario B — Validation retry
@@ -469,7 +492,9 @@ Then add, in order:
 - [ ] Validation failures retry through the coder.
 - [ ] Review failures retry through the coder.
 - [ ] Retry limits are enforced.
-- [ ] Each approved step is committed.
+- [ ] Each approved step creates a local checkpoint commit.
+- [ ] Final checkpoint history is rewritten into one logical commit before push.
+- [ ] Only the final logical commit is pushed to the issue branch.
 - [ ] Blocked workflows preserve workspace and checkpoint.
 - [ ] `--resume` continues the same workflow.
 - [ ] Final branch is pushed.
