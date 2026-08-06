@@ -76,6 +76,9 @@ the saved checkpoint for that issue.
 - Issues are started manually from the CLI.
 - There is no `agent-ready` queue runner.
 - Graph routing and resume paths need dedicated automated tests.
+- Resume is stage-aware only. Side-effecting nodes do not yet persist
+  write-ahead intent or reconcile uncertain completion, so crashes around a
+  commit, history rewrite, push, or PR operation can require manual recovery.
 - GitHub Actions is not yet the final independent validation gate.
 - Reviewer independence is not yet enforced. The current configuration can use
   the same underlying model family for coding and review, and reviewer identity

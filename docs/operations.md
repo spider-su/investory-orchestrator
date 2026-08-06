@@ -119,6 +119,64 @@ Before resuming, fix the external condition when the failure is infrastructure
 related, such as credentials, quota, provider availability, or Dev Container
 startup.
 
+## Resume reconciliation procedure
+
+Do not invoke `--resume` blindly after a process crash near a side effect. The
+checkpoint may contain only the prepared intent even when the operation already
+completed. Until write-ahead operation records and automatic reconciliation are
+implemented for every node, these boundaries require manual inspection.
+
+For a pending or uncertain operation:
+
+1. Stop automated retries and preserve the checkpoint, workspace, and run
+   artifacts.
+2. Record the saved operation intent, expected before-state, expected
+   after-state, and operation identifier.
+3. Inspect the actual workspace, local Git refs, remote branch, comments, and PR
+   state as applicable.
+4. Classify the operation as **not applied**, **applied**, or **ambiguous**.
+5. Retry only a not-applied operation. Adopt an applied result into workflow
+   state without repeating it. Block and repair explicitly when the result is
+   ambiguous or divergent.
+
+Useful local and remote checks include:
+
+```bash
+git status --short --untracked-files=all
+git rev-parse HEAD
+git rev-parse refs/heads/agent/issue-<number>
+git log --format='%H%n%B%n---' --all -20
+git ls-remote origin refs/heads/agent/issue-<number>
+```
+
+Inspect GitHub for an existing open PR by the exact head branch before creating
+a PR. Inspect issue comments for their stable marker before publishing another
+comment.
+
+### Boundary-specific recovery
+
+- **Coder crashed with changed files:** archive the complete tracked and
+  untracked diff as an uncertain attempt, reset to the saved step baseline, and
+  do not increment the attempt a second time.
+- **Validation completed but state was not saved:** adopt a complete result only
+  when its candidate, command, and environment fingerprints match. Otherwise
+  rerun deterministic validation.
+- **Commit succeeded but its SHA was not saved:** locate a commit with the saved
+  operation trailer, expected parent, and expected tree; adopt that SHA instead
+  of creating another commit.
+- **Final history rewrite may have completed:** compare the issue branch with the
+  saved checkpoint tip and expected final commit. Adopt the final commit when it
+  matches; complete the compare-and-set update only when the branch still points
+  to the checkpoint tip; block on any other ref.
+- **Push may have succeeded:** compare the remote ref with the intended target.
+  Target means success, the expected old SHA permits retry, and any other SHA is
+  a conflict.
+- **PR state was not saved:** query by repository, base, and head. Adopt and
+  update the existing PR; create only when no matching PR exists.
+
+The full node contract and operation-record schema are defined in
+[`architecture.md`](architecture.md#resume-safety-contract).
+
 ## Inspect a workspace
 
 ```bash

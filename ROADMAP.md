@@ -25,7 +25,7 @@ completion gate.
 | **MVP:** Reviewer repair loop | Yes | No | No |
 | **MVP:** Retry exhaustion and blocked state | Yes | No | No |
 | **MVP:** Local checkpoint commits | Yes | No | No |
-| **MVP:** Stage-aware resume | Yes | No | No |
+| **MVP:** Stage-aware resume routing | Yes | No | No |
 | **MVP:** Issue branch push | Yes | No | No |
 | **MVP:** Draft PR creation or update | Yes | No | No |
 | **Hardening:** Failed-attempt artifact preservation | Yes | No | No |
@@ -36,6 +36,7 @@ completion gate.
 | **Hardening:** Final logical history rewrite | Yes | No | No |
 | **Hardening:** Automatic issue-contract validation | No | No | No |
 | **Hardening:** Graph and routing test coverage | No | No | No |
+| **Hardening:** Side-effect intent and resume reconciliation | No | No | No |
 | **Hardening:** Reviewer independence enforcement | No | No | No |
 | **Hardening:** GitHub Actions independent validation | No | No | No |
 | **Hardening:** Pluggable agent backends | No | No | No |
@@ -77,6 +78,16 @@ state for safe resume.
 - Add graph tests for every conditional route and retry boundary.
 - Test resume from environment, coder, reviewer, validation, push, and PR
   failures.
+- Persist write-ahead intent before every workspace, commit, history rewrite,
+  push, comment, and PR side effect.
+- Define deterministic operation IDs, expected before-and-after state, and
+  durable external references for each side-effecting node.
+- Reconcile local Git, remote refs, comments, and PRs before replaying an
+  operation whose completion is uncertain.
+- Add crash-boundary tests for dirty coder worktrees, completed validation with
+  missing state, commits with missing SHA state, interrupted finalization,
+  successful pushes with missing confirmation, and PR upserts with missing
+  metadata.
 - Verify failed-attempt artifact preservation and clean retry isolation.
 - Enforce fresh, read-only reviewer invocations without coder session history or
   hidden reasoning.
@@ -136,11 +147,13 @@ routing tests, independent CI, and recovery behavior are verified.
 
 1. Pass all supervised MVP scenarios.
 2. Add graph and resume integration tests.
-3. Add automatic issue-contract validation.
-4. Improve blocked-state reporting and recovery controls.
-5. Add independent GitHub Actions validation.
-6. Verify retry isolation, whole-plan repair, and history rewriting.
-7. Introduce pluggable agent backends and prompt builders.
-8. Add structured repository metadata and operational telemetry.
-9. Add the sequential `agent-ready` queue.
-10. Add polling, webhooks, and optional parallelism.
+3. Implement write-ahead side-effect intent and uncertain-completion
+   reconciliation.
+4. Add automatic issue-contract validation.
+5. Improve blocked-state reporting and recovery controls.
+6. Add independent GitHub Actions validation.
+7. Verify retry isolation, whole-plan repair, and history rewriting.
+8. Introduce pluggable agent backends and prompt builders.
+9. Add structured repository metadata and operational telemetry.
+10. Add the sequential `agent-ready` queue.
+11. Add polling, webhooks, and optional parallelism.
