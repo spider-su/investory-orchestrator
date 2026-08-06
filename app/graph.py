@@ -35,6 +35,7 @@ from app.test_runner import (
 )
 from app.workspace import (
     commit_step,
+    finalize_checkpoint_history,
     prepare_workspace,
     push_branch,
 )
@@ -184,9 +185,15 @@ def prepare_workspace_node(state: WorkflowState) -> dict:
     print(f"Workspace prepared: {workspace}")
     print(f"Branch prepared: {branch}")
 
+    issue_baseline_sha = (
+        state.get("issue_baseline_sha")
+        or current_head(workspace)
+    )
+
     return {
         "workspace": str(workspace),
         "branch": branch,
+        "issue_baseline_sha": issue_baseline_sha,
     }
 
 
@@ -700,18 +707,402 @@ def complete_step_node(state: WorkflowState) -> dict:
         "step_baseline_sha": "",
         "last_failed_patch_path": "",
         "commit_sha": commit_sha,
+        "checkpoint_commits": (
+            [*state.get("checkpoint_commits", []), commit_sha]
+            if commit_sha
+            else list(state.get("checkpoint_commits", []))
+        ),
     }
 
 
 def route_after_step_completion(state: WorkflowState) -> str:
     if state["current_step"] >= len(state["steps"]):
-        return "workflow_complete"
+        return "prepare_final_review"
 
     return "prepare_current_step"
 
 
+def prepare_final_review_node(state: WorkflowState) -> dict:
+    workspace = Path(state["workspace"])
+
+    if workspace_has_changes(workspace):
+        message = (
+            "The workspace contains uncommitted changes after the final "
+            "checkpoint step. Refusing to start whole-plan review."
+        )
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_final_review",
+            "error": message,
+        }
+
+    baseline_sha = current_head(workspace)
+    print(f"Whole-plan checkpoint baseline: {baseline_sha}")
+
+    return {
+        "workflow_status": "validating",
+        "final_baseline_sha": baseline_sha,
+        "final_attempt": 0,
+        "last_failed_final_patch_path": "",
+        "final_validation_status": "not_started",
+        "final_validation_exit_code": 0,
+        "final_validation_output": "",
+        "final_review_status": "not_started",
+        "final_review": {},
+        "final_review_error": "",
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
+def route_after_prepare_final_review(state: WorkflowState) -> str:
+    if state["workflow_status"] == "blocked":
+        return "blocked"
+
+    return "final_validation"
+
+
+def final_validation_node(state: WorkflowState) -> dict:
+    print("Running final whole-plan validation")
+
+    result = run_validation(
+        Path(state["workspace"]),
+        state["issue_number"],
+    )
+
+    if result["success"]:
+        print("Final validation succeeded")
+        return {
+            "workflow_status": "validating",
+            "final_validation_status": "validation_success",
+            "final_validation_exit_code": 0,
+            "final_validation_output": result["output"],
+            "blocked_reason": "",
+            "blocked_stage": "",
+            "error": "",
+        }
+
+    print("Final validation failed")
+    return {
+        "workflow_status": "validating",
+        "final_validation_status": "project_validation_failure",
+        "final_validation_exit_code": result["exit_code"],
+        "final_validation_output": result["output"],
+        "error": "",
+    }
+
+
+def route_after_final_validation(state: WorkflowState) -> str:
+    if (
+        state["final_validation_status"]
+        == "validation_success"
+    ):
+        return "final_reviewer"
+
+    if state["final_attempt"] == 0:
+        return "final_integration_coder"
+
+    return "isolate_final_validation_failure"
+
+
+def final_integration_coder_node(state: WorkflowState) -> dict:
+    next_attempt = state["final_attempt"] + 1
+    max_attempts = state["max_final_attempts"]
+
+    print(
+        "Running whole-plan integration repair "
+        f"{next_attempt}/{max_attempts}"
+    )
+
+    integration_step = {
+        "id": "whole-plan-integration",
+        "title": "Resolve whole-plan integration findings",
+        "goal": (
+            "Produce one coherent implementation of the complete issue. "
+            "Checkpointed step decisions are provisional and may be revised."
+        ),
+        "requirements": [
+            "Address final validation failures and whole-plan review findings.",
+            "Reconsider earlier abstractions when later steps exposed a poor design.",
+            "Keep the complete change within the original issue scope.",
+            "Preserve all issue-level acceptance criteria.",
+        ],
+        "acceptance_criteria": state["plan"].get(
+            "acceptance_criteria",
+            [],
+        ),
+        "affected_areas": [
+            area
+            for step in state["steps"]
+            for area in step.get("affected_areas", [])
+        ],
+        "status": "in_progress",
+    }
+
+    try:
+        summary = run_coder(
+            workspace=Path(state["workspace"]),
+            issue_number=state["issue_number"],
+            issue_title=state["issue_title"],
+            issue_body=state["issue_body"],
+            step=integration_step,
+            validation_output=state["final_validation_output"],
+            review_feedback=state["final_review"],
+            attempt=next_attempt,
+            max_attempts=max_attempts,
+            failed_patch_path=state.get(
+                "last_failed_final_patch_path",
+                "",
+            ),
+        )
+    except CoderError as error:
+        message = str(error)
+        workspace = Path(state["workspace"])
+        artifacts = list(state.get("attempt_artifacts", []))
+        last_patch = state.get(
+            "last_failed_final_patch_path",
+            "",
+        )
+
+        if workspace_has_changes(workspace):
+            try:
+                artifact = archive_and_reset_failed_attempt(
+                    workspace=workspace,
+                    issue_number=state["issue_number"],
+                    step_id="whole-plan",
+                    attempt=next_attempt,
+                    failure_stage="final-coder",
+                    baseline_sha=state["final_baseline_sha"],
+                    coder_summary="",
+                    validation_output="",
+                    validation_exit_code=0,
+                    review={},
+                )
+                artifacts.append(artifact)
+                last_patch = artifact["patch_path"]
+            except RetryIsolationError as isolation_error:
+                message = (
+                    f"{message}\n\n"
+                    "Failed to isolate partial whole-plan changes:\n"
+                    f"{isolation_error}"
+                )
+
+        return {
+            "coder_error": message,
+            "attempt_artifacts": artifacts,
+            "last_failed_final_patch_path": last_patch,
+            "blocked_reason": message,
+            "blocked_stage": "final_integration_coder",
+            "error": message,
+        }
+
+    print("Whole-plan integration repair completed")
+    return {
+        "workflow_status": "implementing",
+        "final_attempt": next_attempt,
+        "coder_summary": summary,
+        "coder_error": "",
+        "final_review_status": "not_started",
+        "final_review": {},
+        "final_review_error": "",
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
+def route_after_final_integration_coder(
+    state: WorkflowState,
+) -> str:
+    if state["coder_error"]:
+        return "blocked"
+
+    return "final_validation"
+
+
+def final_reviewer_node(state: WorkflowState) -> dict:
+    print("Running final whole-plan review")
+
+    try:
+        review = review_implementation(
+            workspace=Path(state["workspace"]),
+            issue_number=state["issue_number"],
+            issue_title=state["issue_title"],
+            issue_body=state["issue_body"],
+            plan=state["plan"],
+            validation_output=state["final_validation_output"],
+            review_scope="whole_plan",
+            baseline_sha=state["issue_baseline_sha"],
+        )
+    except ReviewerError as error:
+        message = str(error)
+        return {
+            "final_review_status": "review_failure",
+            "final_review": {},
+            "final_review_error": message,
+            "blocked_reason": message,
+            "blocked_stage": "final_reviewer",
+            "error": message,
+        }
+
+    print(f"Final review result: {review.status}")
+    return {
+        "workflow_status": "reviewing",
+        "final_review_status": review.status,
+        "final_review": review.model_dump(mode="json"),
+        "final_review_error": "",
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
+def route_after_final_reviewer(state: WorkflowState) -> str:
+    if state["final_review_status"] == "review_failure":
+        return "blocked"
+
+    if state["final_review_status"] == "approved":
+        return "finalize_history"
+
+    if state["final_attempt"] == 0:
+        return "final_integration_coder"
+
+    return "isolate_final_review_failure"
+
+
+def _isolate_final_attempt(
+    state: WorkflowState,
+    *,
+    failure_stage: str,
+) -> dict:
+    try:
+        artifact = archive_and_reset_failed_attempt(
+            workspace=Path(state["workspace"]),
+            issue_number=state["issue_number"],
+            step_id="whole-plan",
+            attempt=state["final_attempt"],
+            failure_stage=failure_stage,
+            baseline_sha=state["final_baseline_sha"],
+            coder_summary=state["coder_summary"],
+            validation_output=state["final_validation_output"],
+            validation_exit_code=state[
+                "final_validation_exit_code"
+            ],
+            review=state["final_review"],
+        )
+    except RetryIsolationError as error:
+        message = (
+            "Failed to preserve and reset the whole-plan repair.\n"
+            f"{error}"
+        )
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "final_integration_coder",
+            "error": message,
+        }
+
+    exhausted = (
+        state["final_attempt"] >= state["max_final_attempts"]
+    )
+    reason = ""
+
+    if exhausted:
+        reason = (
+            f"{failure_stage} failed after "
+            f"{state['final_attempt']} whole-plan repair attempts. "
+            f"Last failed patch: {artifact['patch_path']}"
+        )
+
+    print(
+        f"Archived failed {failure_stage} repair: "
+        f"{artifact['patch_path']}"
+    )
+
+    return {
+        "attempt_artifacts": [
+            *state.get("attempt_artifacts", []),
+            artifact,
+        ],
+        "last_failed_final_patch_path": artifact["patch_path"],
+        "blocked_reason": reason,
+        "blocked_stage": (
+            "final_integration_coder" if exhausted else ""
+        ),
+        "error": "",
+    }
+
+
+def isolate_final_validation_failure_node(
+    state: WorkflowState,
+) -> dict:
+    return _isolate_final_attempt(
+        state,
+        failure_stage="final-validation",
+    )
+
+
+def isolate_final_review_failure_node(
+    state: WorkflowState,
+) -> dict:
+    return _isolate_final_attempt(
+        state,
+        failure_stage="final-review",
+    )
+
+
+def route_after_final_failed_attempt(
+    state: WorkflowState,
+) -> str:
+    if state["error"]:
+        return "blocked"
+
+    if state["final_attempt"] < state["max_final_attempts"]:
+        return "final_integration_coder"
+
+    return "blocked"
+
+
+def finalize_history_node(state: WorkflowState) -> dict:
+    print("Replacing checkpoint commits with final logical commit")
+
+    try:
+        commit_sha = finalize_checkpoint_history(
+            Path(state["workspace"]),
+            baseline_sha=state["issue_baseline_sha"],
+            issue_number=state["issue_number"],
+            issue_title=state["issue_title"],
+        )
+    except RuntimeError as error:
+        message = str(error)
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "finalize_history",
+            "error": message,
+        }
+
+    print(f"Final logical commit: {commit_sha}")
+    return {
+        "final_commit_sha": commit_sha,
+        "commit_sha": commit_sha,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
+def route_after_finalize_history(state: WorkflowState) -> str:
+    if state["workflow_status"] == "blocked":
+        return "blocked"
+
+    return "workflow_complete"
+
+
 def workflow_complete_node(state: WorkflowState) -> dict:
-    print("RESULT: ALL IMPLEMENTATION STEPS COMPLETED")
+    print("RESULT: WHOLE-PLAN IMPLEMENTATION APPROVED")
     return {}
 
 
@@ -770,6 +1161,9 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
             "## Validation\n\n"
             "- Local validation passed for every step\n"
             "- Automated reviewer approved every step\n"
+            "- Final whole-plan validation passed\n"
+            "- Final whole-plan review approved the integrated change\n\n"
+            f"Final commit: `{state['final_commit_sha']}`\n"
         )
 
         pull_request = client.find_open_pr_by_branch(
@@ -871,6 +1265,8 @@ def blocked_node(state: WorkflowState) -> dict:
         or state["coder_error"]
         or state["review_error"]
         or state["test_output"]
+        or state.get("final_review_error", "")
+        or state.get("final_validation_output", "")
         or state["error"]
         or "Workflow blocked without a recorded reason."
     )
@@ -948,6 +1344,34 @@ def build_graph():
         publish_review_node,
     )
     builder.add_node("complete_step", complete_step_node)
+    builder.add_node(
+        "prepare_final_review",
+        prepare_final_review_node,
+    )
+    builder.add_node(
+        "final_validation",
+        final_validation_node,
+    )
+    builder.add_node(
+        "final_integration_coder",
+        final_integration_coder_node,
+    )
+    builder.add_node(
+        "isolate_final_validation_failure",
+        isolate_final_validation_failure_node,
+    )
+    builder.add_node(
+        "final_reviewer",
+        final_reviewer_node,
+    )
+    builder.add_node(
+        "isolate_final_review_failure",
+        isolate_final_review_failure_node,
+    )
+    builder.add_node(
+        "finalize_history",
+        finalize_history_node,
+    )
     builder.add_node(
         "workflow_complete",
         workflow_complete_node,
@@ -1058,7 +1482,79 @@ def build_graph():
         route_after_step_completion,
         {
             "prepare_current_step": "prepare_current_step",
+            "prepare_final_review": "prepare_final_review",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "prepare_final_review",
+        route_after_prepare_final_review,
+        {
+            "final_validation": "final_validation",
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "final_validation",
+        route_after_final_validation,
+        {
+            "final_reviewer": "final_reviewer",
+            "final_integration_coder": (
+                "final_integration_coder"
+            ),
+            "isolate_final_validation_failure": (
+                "isolate_final_validation_failure"
+            ),
+        },
+    )
+    builder.add_conditional_edges(
+        "final_integration_coder",
+        route_after_final_integration_coder,
+        {
+            "final_validation": "final_validation",
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "isolate_final_validation_failure",
+        route_after_final_failed_attempt,
+        {
+            "final_integration_coder": (
+                "final_integration_coder"
+            ),
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "final_reviewer",
+        route_after_final_reviewer,
+        {
+            "finalize_history": "finalize_history",
+            "final_integration_coder": (
+                "final_integration_coder"
+            ),
+            "isolate_final_review_failure": (
+                "isolate_final_review_failure"
+            ),
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "isolate_final_review_failure",
+        route_after_final_failed_attempt,
+        {
+            "final_integration_coder": (
+                "final_integration_coder"
+            ),
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "finalize_history",
+        route_after_finalize_history,
+        {
             "workflow_complete": "workflow_complete",
+            "blocked": "blocked",
         },
     )
 
@@ -1130,6 +1626,8 @@ def main() -> None:
         "completed_steps": [],
         "workspace": "",
         "branch": "",
+        "issue_baseline_sha": "",
+        "checkpoint_commits": [],
         "attempt": 0,
         "max_attempts": int(
             os.getenv("MAX_ATTEMPTS", "3")
@@ -1137,6 +1635,22 @@ def main() -> None:
         "step_baseline_sha": "",
         "attempt_artifacts": [],
         "last_failed_patch_path": "",
+        "final_baseline_sha": "",
+        "final_attempt": 0,
+        "max_final_attempts": int(
+            os.getenv(
+                "MAX_FINAL_ATTEMPTS",
+                os.getenv("MAX_ATTEMPTS", "3"),
+            )
+        ),
+        "last_failed_final_patch_path": "",
+        "final_validation_status": "not_started",
+        "final_validation_exit_code": 0,
+        "final_validation_output": "",
+        "final_review_status": "not_started",
+        "final_review": {},
+        "final_review_error": "",
+        "final_commit_sha": None,
         "environment_output": "",
         "environment_ready": False,
         "validation_status": "not_started",
@@ -1192,6 +1706,10 @@ def main() -> None:
             "environment": "prepare_workspace",
             "coder": "prepare_current_step",
             "reviewer": "run_validation",
+            "prepare_final_review": "complete_step",
+            "final_integration_coder": "prepare_final_review",
+            "final_reviewer": "final_validation",
+            "finalize_history": "final_reviewer",
             "push_branch": "workflow_complete",
             "create_draft_pr": "push_branch",
         }.get(blocked_stage)
@@ -1209,6 +1727,13 @@ def main() -> None:
             )
         )
 
+        configured_max_final_attempts = int(
+            os.getenv(
+                "MAX_FINAL_ATTEMPTS",
+                str(saved_state.get("max_final_attempts", 3)),
+            )
+        )
+
         if (
             blocked_stage == "coder"
             and saved_state["attempt"] >= configured_max_attempts
@@ -1218,15 +1743,30 @@ def main() -> None:
                 f"above {saved_state['attempt']} before resuming."
             )
 
+        if (
+            blocked_stage == "final_integration_coder"
+            and saved_state.get("final_attempt", 0)
+            >= configured_max_final_attempts
+        ):
+            raise RuntimeError(
+                "Whole-plan repair limit is exhausted. Increase "
+                "MAX_FINAL_ATTEMPTS above "
+                f"{saved_state.get('final_attempt', 0)} before resuming."
+            )
+
         graph.update_state(
             config,
             {
                 "workflow_status": "implementing",
                 "max_attempts": configured_max_attempts,
+                "max_final_attempts": (
+                    configured_max_final_attempts
+                ),
                 "blocked_reason": "",
                 "blocked_stage": "",
                 "coder_error": "",
                 "review_error": "",
+                "final_review_error": "",
                 "error": "",
             },
             as_node=resume_from,

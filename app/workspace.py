@@ -171,11 +171,66 @@ def commit_step(
 ) -> str | None:
     commit_sha = commit_changes(
         workspace,
-        f"Complete {step_id}: {step_title}",
+        f"Checkpoint {step_id}: {step_title}",
     )
 
     return commit_sha
 
+
+def finalize_checkpoint_history(
+    workspace: Path,
+    *,
+    baseline_sha: str,
+    issue_number: int,
+    issue_title: str,
+) -> str:
+    """Replace local checkpoint commits with one final logical commit."""
+    _mark_safe_directory(workspace)
+
+    _run(
+        ["git", "cat-file", "-e", f"{baseline_sha}^{{commit}}"],
+        cwd=workspace,
+    )
+
+    # Preserve both committed checkpoint changes and any approved
+    # whole-plan repair that is still uncommitted.
+    _run(["git", "reset", "--soft", baseline_sha], cwd=workspace)
+    _run(["git", "add", "--all"], cwd=workspace)
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", "."],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+    )
+
+    if staged.returncode == 0:
+        raise RuntimeError(
+            "No implementation changes remain after checkpoint "
+            "history was reset."
+        )
+
+    if staged.returncode != 1:
+        raise RuntimeError(
+            "Could not inspect staged final implementation.\n"
+            f"stdout:\n{staged.stdout}\n"
+            f"stderr:\n{staged.stderr}"
+        )
+
+    _run(
+        [
+            "git",
+            "commit",
+            "-m",
+            f"Implement #{issue_number}: {issue_title}",
+        ],
+        cwd=workspace,
+    )
+
+    return _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+    ).strip()
 
 
 def push_branch(

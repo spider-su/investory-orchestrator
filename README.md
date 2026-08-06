@@ -1,110 +1,38 @@
 # Investory Orchestrator
 
-Investory Orchestrator is an AI-driven workflow that implements GitHub issues with minimal human intervention.
+Investory Orchestrator turns an agent-ready GitHub issue into a validated draft
+pull request. It is a workflow and policy layer around coding agents, Git,
+GitHub, Dev Containers, and deterministic project validation.
 
-The orchestrator coordinates specialized agents that:
-
-1. Read and understand a GitHub issue.
-2. Create an implementation plan.
-3. Prepare an isolated workspace.
-4. Start the project's development environment.
-5. Implement the solution.
-6. Validate the project.
-7. Review the implementation.
-8. Push changes and create a draft pull request.
+The orchestrator does not merge pull requests automatically. Human review
+remains the final approval step.
 
 ## Workflow
-Investory Orchestrator turns an agent-ready GitHub issue into a validated draft pull
-request. It is a workflow and policy layer around coding agents, Git, GitHub,
-Dev Containers, and project validation.
-
-The current implementation processes one issue at a time:
 
 ```text
-Issue
-  │
-  ▼
-Planner
-  │
-  ▼
-Workspace
-  │
-  ▼
-Environment
-  │
-  ▼
-Coder
-  │
-  ▼
-Validation
-  ├── fail ──► Coder (retry)
-  └── pass
-         │
-         ▼
-Reviewer
-  ├── changes required ─► Coder
-  └── approved
-         │
-         ▼
-Commit step
-         │
-         ▼
-Next step?
-  ├── yes ─► Coder
-  └── no
-         │
-         ▼
-Push branch
-         │
-         ▼
-Draft Pull Request
+GitHub issue
+→ issue workspace and branch
+→ bounded repository context
+→ structured implementation plan
+→ Dev Container startup
+→ implement one plan step
+→ deterministic validation
+→ step review
+→ checkpoint commit
+→ repeat remaining steps
+→ final whole-plan validation
+→ final whole-plan review
+├── changes required → isolated integration repair
+└── approved
+    → rewrite checkpoint history
+    → final logical commit
+    → push branch
+    → create or update draft PR
 ```
 
-## Components
-
-- **Planner** – converts an issue into a structured implementation plan.
-- **Coder** – modifies the repository to complete one implementation step.
-- **Validator** – executes the project's validation commands.
-- **Reviewer** – verifies implementation quality against the issue and plan.
-- **GitHub Client** – communicates with GitHub using a GitHub App.
-- **Workspace Manager** – creates and maintains isolated workspaces.
-- **Environment Manager** – starts and stops Dev Containers.
-
-## Running
-
-```bash
-python -m app.graph --issue <number>
-```
-
-Example:
-
-```bash
-python -m app.graph --issue 18
-```
-
-## Current Goals
-
-- Reliable autonomous implementation
-- Deterministic validation
-- Repeatable workflows
-- Safe retries
-- Resume interrupted executions
-- Draft pull requests for human review+GitHub issue
-  → issue workspace and branch
-  → bounded repository context
-  → structured implementation plan
-  → Dev Container startup
-  → implement one plan step
-  → project validation
-  → automated review
-  → commit approved step
-  → repeat remaining steps
-  → push branch
-  → create or update draft PR
-```
-
-The orchestrator does not merge pull requests automatically. Human review remains
-the final approval step.
+Checkpoint commits are local recovery boundaries. Only the final logical commit
+is pushed after the complete implementation passes validation and whole-plan
+review.
 
 ## Agent-ready issue contract
 
@@ -310,7 +238,7 @@ For every plan step:
 4. Retry the coder when validation fails.
 5. Run the reviewer when validation succeeds.
 6. Retry the coder when the reviewer requests changes.
-7. Commit the approved step.
+7. Create a local checkpoint commit for the approved step.
 
 The retry count is bounded by `MAX_ATTEMPTS`.
 
@@ -409,22 +337,86 @@ A failed attempt is diagnostic input, not permission to broaden the solution.
 
 #### Current implementation status
 
-The current implementation still lets the coder edit the accumulated
-uncommitted diff after validation or review failure. Failed-attempt patch
-archival and reset-to-baseline isolation are not implemented yet.
+The orchestrator archives the failed patch and diagnostics, resets the
+workspace to the step baseline, and gives the next coder attempt the archived
+patch as read-only context.
 
-Until retry isolation is implemented, failed attempts can contaminate later
-attempts. This must be resolved before enabling unattended queue execution.
+### Checkpoint commits and final logical history
+
+Step approval is provisional. A step-level reviewer proves that the current
+candidate satisfies the current step; it does not prove that the architecture
+will remain suitable after every later step is implemented.
+
+Approved steps therefore create **checkpoint commits**:
+
+- they provide recovery and resume boundaries
+- they isolate later step work
+- they remain local until whole-plan approval
+- they may be rewritten or removed
+- they are not treated as final architectural decisions
+
+After the final checkpoint, the orchestrator runs the complete validation suite
+again and performs a whole-plan review over the diff from the original issue
+baseline.
+
+The whole-plan reviewer checks:
+
+- every issue-level acceptance criterion
+- interactions between implementation steps
+- abstractions invalidated by later work
+- duplicated concepts and compensating workarounds
+- public API and domain-model consistency
+- migrations, configuration, and compatibility
+- integration-level test coverage
+- unrelated scope growth
+
+When final validation fails or the whole-plan reviewer requests changes, an
+integration repair attempt may revise code introduced by any checkpointed step.
+The ordinary step boundaries no longer restrict that repair, but the original
+issue scope and acceptance criteria still apply.
+
+Whole-plan repair attempts use the same isolation rule:
+
+```text
+checkpoint tip
+→ integration repair
+→ final validation
+→ whole-plan review
+├── failed
+│   → archive patch and diagnostics
+│   → reset to checkpoint tip
+│   → retry
+└── approved
+```
+
+`MAX_FINAL_ATTEMPTS` bounds whole-plan repair attempts and defaults to
+`MAX_ATTEMPTS`.
+
+After final approval, checkpoint commits are replaced with one logical commit:
+
+```text
+git reset --soft <issue-baseline-sha>
+git add --all
+git commit -m "Implement #<issue-number>: <issue-title>"
+```
+
+Only this final logical history is pushed to the draft pull request. Checkpoint
+commit SHAs remain in workflow state for diagnostics, but they are no longer
+reachable from the issue branch after finalization.
 
 ### Completion phase
 
-After all steps are approved:
+After all steps are checkpointed:
 
-1. Push `agent/issue-<number>`.
-2. Find an existing open pull request for that branch.
-3. Update it, or create a new draft pull request.
-4. Mark the workflow completed only after the pull request operation succeeds.
-5. Stop the Dev Container environment.
+1. Run final whole-plan validation.
+2. Run the final whole-plan reviewer.
+3. Repair integration findings when required.
+4. Replace checkpoint commits with the final logical commit.
+5. Push `agent/issue-<number>`.
+6. Find an existing open pull request for that branch.
+7. Update it, or create a new draft pull request.
+8. Mark the workflow completed only after the pull request operation succeeds.
+9. Stop the Dev Container environment.
 
 ### Blocked workflows
 
@@ -537,7 +529,8 @@ Responsibilities:
 - create or reuse `agent/issue-<number>`
 - mark mounted repositories as safe Git directories
 - configure the automated Git identity
-- create one commit per approved step
+- create local checkpoint commits for approved steps
+- rewrite checkpoint history into one final logical commit
 - push the issue branch with GitHub App authentication
 
 Existing workspaces are preserved so blocked workflows can be inspected and
@@ -656,6 +649,11 @@ review_failure
 Blocking findings route back to the coder when retries remain. The reviewer does
 not edit files.
 
+The same reviewer backend also performs a final `whole_plan` review. That review
+receives the complete plan, final validation output, and the full diff from the
+issue baseline. It may require redesign of an earlier checkpoint when the
+integrated implementation is inconsistent or unnecessarily complex.
+
 ## Configuration
 
 The exact environment file depends on the selected agent providers. Common
@@ -669,6 +667,7 @@ GITHUB_REPOSITORY=spider-su/investory
 
 WORKSPACES_DIR=/home/alex/investory-orchestrator/workspaces
 MAX_ATTEMPTS=3
+MAX_FINAL_ATTEMPTS=3
 PUBLISH_PLAN_COMMENT=true
 PUBLISH_REVIEW_COMMENT=true
 ```

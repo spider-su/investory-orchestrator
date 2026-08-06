@@ -33,11 +33,26 @@ class WorkflowState(TypedDict):
     workspace: str
     branch: str
 
+    issue_baseline_sha: str
+    checkpoint_commits: list[str]
+
     attempt: int
     max_attempts: int
     step_baseline_sha: str
     attempt_artifacts: list[dict[str, Any]]
     last_failed_patch_path: str
+
+    final_baseline_sha: str
+    final_attempt: int
+    max_final_attempts: int
+    last_failed_final_patch_path: str
+    final_validation_status: ValidationStatus
+    final_validation_exit_code: int
+    final_validation_output: str
+    final_review_status: ReviewStatus
+    final_review: dict[str, Any]
+    final_review_error: str
+    final_commit_sha: Optional[str]
 
     coder_summary: str
     coder_error: str

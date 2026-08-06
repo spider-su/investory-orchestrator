@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 
 ReviewStatus = Literal["approved", "changes_required"]
+ReviewScope = Literal["step", "whole_plan"]
 
 
 class ReviewFinding(BaseModel):
@@ -55,12 +56,21 @@ def _run_git(
     return result.stdout
 
 
-def _branch_diff(workspace: Path) -> str:
+def _branch_diff(
+    workspace: Path,
+    *,
+    baseline_sha: str | None = None,
+) -> str:
     sections: list[str] = []
+    committed_range = (
+        f"{baseline_sha}..HEAD"
+        if baseline_sha
+        else "origin/main...HEAD"
+    )
 
     committed = _run_git(
         workspace,
-        ["diff", "--no-ext-diff", "origin/main...HEAD"],
+        ["diff", "--no-ext-diff", committed_range],
     )
     if committed.strip():
         sections.extend(
@@ -97,7 +107,10 @@ def _branch_diff(workspace: Path) -> str:
     return (
         "\n\n".join(sections)
         if sections
-        else "No changes compared with origin/main."
+        else (
+            "No changes compared with "
+            f"{baseline_sha or 'origin/main'}."
+        )
     )
 
 
@@ -109,6 +122,8 @@ def review_implementation(
     issue_body: str,
     plan: dict,
     validation_output: str,
+    review_scope: ReviewScope = "step",
+    baseline_sha: str | None = None,
 ) -> ReviewResult:
     model = ChatOpenAI(
         model=os.getenv(
@@ -122,6 +137,25 @@ def review_implementation(
         ReviewResult,
         method="json_schema",
     )
+
+    scope_rules = (
+        """
+- Review the complete implementation across every plan step.
+- Verify all issue-level acceptance criteria and interactions between steps.
+- Look for abstractions that became unsuitable as later steps were added.
+- Look for duplicated concepts, compensating workarounds, inconsistent public
+  APIs, incompatible migrations or configuration, and missing integration tests.
+- A locally valid earlier step must not be treated as immutable.
+- Request changes when redesigning an earlier checkpoint would produce a more
+  coherent implementation.
+"""
+        if review_scope == "whole_plan"
+        else """
+- Concentrate on the current implementation step and its acceptance criteria.
+- Treat earlier approved steps as context, while still reporting direct
+  regressions caused by the current candidate.
+"""
+    ).strip()
 
     prompt = f"""
 You are reviewing an implementation in the Investory repository.
@@ -139,9 +173,13 @@ Validation output:
 {validation_output or "No validation output was supplied."}
 
 Git diff:
-{_branch_diff(workspace)}
+{_branch_diff(workspace, baseline_sha=baseline_sha)}
+
+Review scope:
+{review_scope}
 
 Review rules:
+{scope_rules}
 - Review only against the issue and approved plan.
 - Verify overall and step-level acceptance criteria.
 - Check for missing behaviour, incorrect behaviour, unrelated changes,
