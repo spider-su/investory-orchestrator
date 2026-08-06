@@ -81,8 +81,9 @@ Return a concise implementation summary.
     command = [
         "codex",
         "exec",
-        "--ephemeral",
-        "--full-auto",
+        "--sandbox",
+        "workspace-write",
+        "-",
     ]
 
     model = os.getenv("CODER_MODEL")
