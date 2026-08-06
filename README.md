@@ -7,7 +7,24 @@ GitHub, Dev Containers, and deterministic project validation.
 The orchestrator does not merge pull requests automatically. Human review
 remains the final approval step.
 
-## Workflow
+## Capability status markers
+
+Major workflow capabilities use these status markers:
+
+- **VERIFIED** — implemented and proven by repeatable end-to-end tests
+- **IMPLEMENTED** — an executable code path exists, but end-to-end verification
+  is still pending
+- **PARTIAL** — only part of the capability exists or an operator must complete
+  part of the workflow manually
+- **PLANNED** — intended behavior without a complete executable code path
+
+No major workflow capability is currently marked **VERIFIED**. `ROADMAP.md` is
+the authoritative source for capability and verification status.
+
+## Workflow — IMPLEMENTED
+
+The complete issue-to-draft-PR path exists, but the roadmap verification
+scenarios have not yet passed repeatedly without manual repository repair.
 
 ```text
 GitHub issue
@@ -34,7 +51,7 @@ Checkpoint commits are local recovery boundaries. Only the final logical commit
 is pushed after the complete implementation passes validation and whole-plan
 review.
 
-## Agent-ready issue contract
+## Agent-ready issue contract — PARTIAL
 
 The workflow depends on the issue defining the product outcome clearly enough
 that the planner does not need to act as a product manager.
@@ -42,10 +59,11 @@ that the planner does not need to act as a product manager.
 An issue is considered **agent-ready** only when it contains the required
 sections below and all material product decisions have already been made.
 
-The current implementation still relies on the operator to enforce this
-contract before starting a run. Automatic issue-contract validation and
-rejection are planned and should run immediately after loading the issue,
-before creating a workspace or invoking the planner.
+The issue structure and operator-enforced contract are implemented. The
+operator must still decide whether an issue satisfies the contract before
+starting a run. Automatic issue-contract validation and rejection are
+**PLANNED** and should run immediately after loading the issue, before creating
+a workspace or invoking the planner.
 
 ### Required issue structure
 
@@ -171,7 +189,7 @@ An issue should not be executed when:
 - the body contains unresolved placeholders such as `TBD`
 - requirements contradict each other
 
-The expected preflight flow is:
+**Automatic preflight status: PLANNED.** The intended flow is:
 
 ```text
 load issue
@@ -183,7 +201,8 @@ load issue
     → planner
 ```
 
-The future queue runner must require both:
+**Queue enforcement status: PLANNED.** The future queue runner must require
+both:
 
 ```text
 agent-ready label
@@ -194,7 +213,7 @@ valid issue contract
 The label is human approval to execute the issue. It must not bypass contract
 validation.
 
-## Command line
+## Command line — IMPLEMENTED
 
 Run a new workflow:
 
@@ -213,7 +232,9 @@ loads the saved checkpoint for the same issue.
 
 ## Workflow behavior
 
-### Planning phase
+### Planning phase — IMPLEMENTED
+
+The planning path exists; repeatable end-to-end verification is pending.
 
 1. Load the issue title and body from GitHub.
 2. Prepare or reuse `workspaces/issue-<number>`.
@@ -227,7 +248,10 @@ Repository-specific questions such as build tool, package roots, and test
 conventions should normally be answered from repository context rather than
 asked of the user.
 
-### Implementation phase
+### Implementation phase — IMPLEMENTED
+
+The multi-step implementation path exists; repeatable end-to-end verification
+is pending.
 
 For every plan step:
 
@@ -242,7 +266,7 @@ For every plan step:
 
 The retry count is bounded by `MAX_ATTEMPTS`.
 
-### Retry semantics
+### Retry semantics — IMPLEMENTED
 
 Retries are scoped to the current implementation step. `MAX_ATTEMPTS` is a
 per-step limit, shared by validation and review repair loops.
@@ -268,7 +292,7 @@ implementation attempt. Examples include:
 - the reviewer service is unavailable
 - the coder times out before producing a candidate
 
-#### Required workspace isolation
+#### Retry workspace isolation — IMPLEMENTED
 
 Every step must establish a baseline at the last approved commit:
 
@@ -335,13 +359,13 @@ The retry must remain constrained to:
 
 A failed attempt is diagnostic input, not permission to broaden the solution.
 
-#### Current implementation status
+#### Archived retry diagnostics — IMPLEMENTED
 
 The orchestrator archives the failed patch and diagnostics, resets the
 workspace to the step baseline, and gives the next coder attempt the archived
 patch as read-only context.
 
-### Checkpoint commits and final logical history
+### Checkpoint commits and final logical history — IMPLEMENTED
 
 Step approval is provisional. A step-level reviewer proves that the current
 candidate satisfies the current step; it does not prove that the architecture
@@ -355,9 +379,10 @@ Approved steps therefore create **checkpoint commits**:
 - they may be rewritten or removed
 - they are not treated as final architectural decisions
 
-After the final checkpoint, the orchestrator runs the complete validation suite
-again and performs a whole-plan review over the diff from the original issue
-baseline.
+**Final whole-plan validation and review: IMPLEMENTED.** After the final
+checkpoint, the orchestrator runs the complete validation suite again and
+performs a whole-plan review over the diff from the original issue baseline.
+End-to-end verification is pending.
 
 The whole-plan reviewer checks:
 
@@ -370,8 +395,9 @@ The whole-plan reviewer checks:
 - integration-level test coverage
 - unrelated scope growth
 
-When final validation fails or the whole-plan reviewer requests changes, an
-integration repair attempt may revise code introduced by any checkpointed step.
+**Isolated integration repair: IMPLEMENTED.** When final validation fails or
+the whole-plan reviewer requests changes, an integration repair attempt may
+revise code introduced by any checkpointed step.
 The ordinary step boundaries no longer restrict that repair, but the original
 issue scope and acceptance criteria still apply.
 
@@ -392,7 +418,8 @@ checkpoint tip
 `MAX_FINAL_ATTEMPTS` bounds whole-plan repair attempts and defaults to
 `MAX_ATTEMPTS`.
 
-After final approval, checkpoint commits are replaced with one logical commit:
+**Final logical history rewrite: IMPLEMENTED.** After final approval,
+checkpoint commits are replaced with one logical commit:
 
 ```text
 git reset --soft <issue-baseline-sha>
@@ -404,7 +431,10 @@ Only this final logical history is pushed to the draft pull request. Checkpoint
 commit SHAs remain in workflow state for diagnostics, but they are no longer
 reachable from the issue branch after finalization.
 
-### Completion phase
+### Completion phase — IMPLEMENTED
+
+Branch push and create-or-update draft PR handling exist. Repeatable end-to-end
+verification, including existing-PR reuse, is pending.
 
 After all steps are checkpointed:
 
@@ -418,7 +448,10 @@ After all steps are checkpointed:
 8. Mark the workflow completed only after the pull request operation succeeds.
 9. Stop the Dev Container environment.
 
-### Blocked workflows
+### Blocked workflows and stage-aware resume — IMPLEMENTED
+
+Checkpoint persistence and stage-aware resume paths exist. Route-by-route
+end-to-end verification is pending.
 
 A workflow becomes blocked when an environment, coder, reviewer, push, or pull
 request stage cannot continue safely.
@@ -724,6 +757,7 @@ git log --oneline --decorate -10
 
 ## Current limitations
 
+- no major workflow capability is yet marked **VERIFIED**
 - issues are started manually from the CLI
 - there is no `agent-ready` queue runner yet
 - blocked output can still be verbose
