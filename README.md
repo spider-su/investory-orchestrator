@@ -77,6 +77,9 @@ the saved checkpoint for that issue.
 - There is no `agent-ready` queue runner.
 - Graph routing and resume paths need dedicated automated tests.
 - GitHub Actions is not yet the final independent validation gate.
+- Reviewer independence is not yet enforced. The current configuration can use
+  the same underlying model family for coding and review, and reviewer identity
+  is not yet recorded as workflow evidence.
 - Provider backends are not exposed through a common agent interface.
 - Blocked-state reporting can still be verbose.
 - Codex execution depends on available authentication and usage quota.

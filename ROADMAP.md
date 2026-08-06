@@ -36,6 +36,7 @@ completion gate.
 | **Hardening:** Final logical history rewrite | Yes | No | No |
 | **Hardening:** Automatic issue-contract validation | No | No | No |
 | **Hardening:** Graph and routing test coverage | No | No | No |
+| **Hardening:** Reviewer independence enforcement | No | No | No |
 | **Hardening:** GitHub Actions independent validation | No | No | No |
 | **Hardening:** Pluggable agent backends | No | No | No |
 | **Hardening:** Sequential `agent-ready` queue | No | No | No |
@@ -77,6 +78,12 @@ state for safe resume.
 - Test resume from environment, coder, reviewer, validation, push, and PR
   failures.
 - Verify failed-attempt artifact preservation and clean retry isolation.
+- Enforce fresh, read-only reviewer invocations without coder session history or
+  hidden reasoning.
+- Record coder and reviewer backend, provider, and model identity in workflow
+  state and pull-request evidence.
+- Require different coder and reviewer model identities before labeling an LLM
+  result independent; otherwise label it secondary review.
 - Verify whole-plan repair and final history rewriting.
 - Add GitHub Actions as an independent PR validation gate.
 - Keep PRs draft and retain human merge approval.

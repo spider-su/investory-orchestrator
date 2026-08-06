@@ -90,6 +90,51 @@ attempt. Examples include unavailable authentication, provider outage, Dev
 Container startup failure, reviewer failure, or a coder timeout before a
 candidate is produced.
 
+## Review independence
+
+Automated review has two separate layers:
+
+1. **Deterministic validation** runs repository-owned commands and produces an
+   objective pass or failure result.
+2. **LLM review** evaluates the validated diff against the issue, plan, scope,
+   acceptance criteria, repository rules, and validation output.
+
+An LLM review may be called **independent** only when all of these conditions
+hold:
+
+- The reviewer runs as a new invocation with fresh context. It does not reuse
+  the coder session, conversation memory, or hidden state.
+- The reviewer has read-only access. It cannot modify the workspace, commit,
+  push, or repair the implementation it is judging.
+- The reviewer receives the issue contract, relevant plan scope, repository
+  instructions, current diff, and deterministic validation result.
+- The reviewer does not receive coder chain-of-thought, hidden reasoning,
+  internal prompt transcript, or an instruction to defend the coder's design.
+- The workflow records the coder and reviewer backend, provider, and model
+  identity as review evidence.
+- The reviewer model identity differs from the coder model identity.
+- Deterministic validation runs outside the reviewer and must succeed before
+  the LLM review can approve the change.
+
+A different provider is preferred because it reduces correlated model and
+infrastructure failures, but it is not mandatory. A different model identity
+within the same provider is sufficient for the minimum independence contract
+when the invocation and context are also isolated.
+
+When the coder and reviewer use the same model identity, or when either model
+identity cannot be established, the result must be described as a **secondary
+review**, not an independent review.
+
+The step reviewer and whole-plan reviewer may use the same reviewer backend and
+model because independence is measured against the coder. Each review must
+still use a fresh invocation and the minimum context required for its scope:
+
+- step review receives the current step and its diff
+- whole-plan review receives the complete plan and the full issue-baseline diff
+
+Human pull-request review remains the final approval and is independent of both
+automated layers.
+
 ### Clean retry isolation
 
 Each step records its baseline as the approved `HEAD` at step start. A failed
@@ -279,5 +324,8 @@ does not commit, push, or create a PR.
 ### Reviewer
 
 Runs after deterministic validation and returns `approved`,
-`changes_required`, or `review_failure`. It does not edit files. The same
-backend may also perform the final whole-plan review over the complete diff.
+`changes_required`, or `review_failure`. It does not edit files. Every review
+uses a fresh invocation and excludes coder reasoning. The same reviewer backend
+may perform step and whole-plan reviews, provided each invocation satisfies the
+review-independence policy above. When model separation is not established, the
+result is a secondary review rather than an independent review.

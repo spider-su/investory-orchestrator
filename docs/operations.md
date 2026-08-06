@@ -37,6 +37,34 @@ Planner and reviewer settings may target OpenAI, Azure OpenAI, or an
 OpenAI-compatible gateway such as Open WebUI. The current coding backend uses
 Codex CLI.
 
+## Reviewer independence checks
+
+Before describing an automated review as independent, record these values in
+the run metadata:
+
+- coder backend, provider, and model identity
+- reviewer backend, provider, and model identity
+- confirmation that the reviewer invocation used fresh context
+- confirmation that the reviewer had read-only access
+- deterministic validation command and result
+
+The reviewer must use a different model identity from the coder. A different
+provider is preferred but not required. The reviewer must not receive coder
+chain-of-thought, hidden reasoning, or the coder's session history.
+
+When the model identities are equal or unavailable, report the result as:
+
+```text
+secondary automated review
+```
+
+Do not report it as an independent review in logs, issue comments, or pull
+request summaries.
+
+The current implementation does not yet enforce or persist this contract.
+Until enforcement exists, operators must verify model separation manually and
+treat automated review as secondary when the evidence is incomplete.
+
 ## Credentials
 
 When Codex CLI is used, mount the authenticated host Codex directory into the
