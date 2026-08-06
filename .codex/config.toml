@@ -1,0 +1,12 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+# Strong default for implementation, debugging, and multi-file repository work.
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+
+# Use Luna explicitly for cheap, well-scoped work when needed:
+# codex -m gpt-5.6-luna
+#
+# Examples: repository exploration, isolated tests, formatting, lint fixes,
+# and mechanical refactoring. Keep Terra for architecture, ambiguous failures,
+# financial calculations, and cross-module changes.
