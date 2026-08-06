@@ -210,6 +210,193 @@ Before declaring MVP complete, run these scenarios.
 
 ---
 
+## Current Status and Revised Priorities
+
+The core issue-to-PR workflow is implemented:
+
+- repository-aware planning
+- isolated issue workspaces
+- Dev Container startup and validation
+- multi-step implementation
+- validation and review retries
+- per-step commits
+- stage-aware checkpoints and resume
+- branch push
+- draft pull request creation or update
+
+The remaining work is focused on proving the workflow with real issues,
+simplifying agent integrations, and making unattended operation reliable.
+
+### Priority 1 — Prove and stabilize the MVP
+
+#### End-to-end verification
+
+Run all six MVP scenarios against real or deliberately constructed issues.
+
+Focus first on:
+
+1. successful multi-step execution
+2. validation repair
+3. reviewer repair
+4. retry exhaustion
+5. stage-aware resume
+6. existing pull request reuse
+
+**Done when**
+
+- All scenarios pass repeatedly without manual repository repair.
+- A completed issue produces a reviewable draft PR.
+- A blocked issue preserves enough state to resume safely.
+
+#### Graph and routing tests
+
+Add automated tests for:
+
+- every conditional route
+- retry boundaries
+- step progression
+- environment, coder, reviewer, push, and PR failures
+- resume from every blocked stage
+- completed status only after PR success
+
+#### Blocked-state reporting
+
+Replace raw command dumps with concise summaries containing:
+
+- issue and current step
+- failed stage
+- attempt count
+- short reason
+- relevant final log lines
+- resume command
+- known retry time when available
+
+Post or update one stable issue comment rather than creating duplicates.
+
+#### GitHub Actions validation
+
+- Run the complete validation suite on the PR.
+- Treat CI as the final independent result.
+- Store CI status and URL in workflow state.
+- Keep pull requests in draft state.
+- Do not merge automatically.
+
+### Priority 2 — Simplify agent integration
+
+#### Pluggable agent backends
+
+Introduce a small common interface for planner, coder, and reviewer backends.
+
+Supported backends may include:
+
+- OpenAI API
+- Azure OpenAI
+- Open WebUI
+- Codex CLI
+
+Keep LangGraph state and workflow policy independent from a specific provider.
+
+The interface should support:
+
+- role-specific prompts
+- bounded execution time
+- structured output where required
+- normalized errors
+- optional repository write access
+
+#### Codex-first coding workflow
+
+Use Codex CLI as the preferred coding backend when quota is available:
+
+```text
+planner
+→ Codex implementation
+→ deterministic validation
+→ Codex repair
+→ deterministic validation
+→ independent reviewer
+```
+
+The orchestrator remains responsible for issue and workspace lifecycle,
+retries, checkpoints, validation, commits, push, and draft PR creation.
+
+#### Prompt builder
+
+Replace repeated string concatenation with role-specific prompt builders using:
+
+- issue title and body
+- repository context
+- current step
+- validation output
+- review findings
+- retry metadata
+- repository instructions
+
+#### Structured repository index
+
+Evolve the current context collector into structured metadata:
+
+- languages and frameworks
+- build and test systems
+- modules and package roots
+- entry points
+- important documentation
+- validation commands
+
+### Priority 3 — Add unattended queue execution
+
+Add a sequential runner that:
+
+- selects issues labeled `agent-ready`
+- skips issues already running or represented by an open agent PR
+- applies `agent-running`
+- processes one issue at a time
+- applies `agent-blocked` or `agent-completed`
+- limits issues and failures per run
+- preserves workspaces for blocked issues
+
+Suggested labels:
+
+```text
+agent-ready
+agent-running
+agent-blocked
+agent-completed
+```
+
+Only explicitly approved `agent-ready` issues may run unattended.
+
+Target workflow:
+
+```text
+idea discussion
+→ implementation plan
+→ small GitHub issues
+→ agent-ready queue
+→ overnight implementation
+→ validated draft PRs
+→ morning review and merge
+```
+
+### Priority 4 — Operational improvements
+
+- structured JSON logs per issue
+- per-node and per-agent timings
+- backend, token, cost, and quota reporting
+- `--status`, `--restart`, and explicit resume targets
+- checkpoint and workspace retention policies
+- idempotent plan, review, blocked, and PR updates
+- execution timeouts and nightly limits
+
+### Later work
+
+- dependency-aware execution plans
+- optional parallel independent steps
+- direct read-only repository exploration by planner and reviewer
+- scheduled polling
+- webhook startup
+- optional parallel workers
+
 ## After MVP
 
 ### GitHub Actions validation
@@ -263,16 +450,17 @@ Then add, in order:
 
 ## Recommended Delivery Order
 
-1. Multi-step execution
-2. Retry loop
-3. Step commits
-4. Resume support
-5. Draft PR
-6. End-to-end MVP scenarios
-7. GitHub Actions
-8. Blocked comments
-9. Polling
-10. Webhooks
+1. Run and fix all MVP verification scenarios.
+2. Add graph and resume integration tests.
+3. Improve blocked-state reporting.
+4. Add GitHub Actions validation.
+5. Introduce pluggable agent backends.
+6. Add prompt builders and structured repository metadata.
+7. Add the sequential `agent-ready` queue.
+8. Add structured logging and checkpoint controls.
+9. Add scheduled polling.
+10. Add webhooks.
+11. Consider dependency-aware or parallel execution.
 
 ## MVP Completion Checklist
 
@@ -287,3 +475,5 @@ Then add, in order:
 - [ ] Final branch is pushed.
 - [ ] Draft PR is created or updated.
 - [ ] All six MVP verification scenarios pass.
+- [x] Planner output is normalized into executable steps.
+
