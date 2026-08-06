@@ -21,10 +21,29 @@ Major workflow capabilities use these status markers:
 No major workflow capability is currently marked **VERIFIED**. `ROADMAP.md` is
 the authoritative source for capability and verification status.
 
-## Workflow — IMPLEMENTED
+## Delivery boundary
 
-The complete issue-to-draft-PR path exists, but the roadmap verification
-scenarios have not yet passed repeatedly without manual repository repair.
+The project deliberately separates two delivery stages:
+
+- **Supervised MVP** — a human starts a clear issue, the orchestrator plans and
+  implements it step by step, runs deterministic validation and automated
+  review, preserves resumable checkpoints, pushes the branch, and creates or
+  updates a draft pull request.
+- **Operational hardening** — strict automatic issue-contract validation,
+  failed-attempt artifact preservation, clean-workspace retry isolation,
+  provisional checkpoint approval, whole-plan architectural review, cross-step
+  integration repair, and final commit-history rewriting.
+
+Hardening capabilities may already be implemented and enabled in the current
+workflow. They do not expand the supervised MVP completion criteria. They must
+be verified before the orchestrator is considered safe for unattended or
+production operation.
+
+## Current workflow — IMPLEMENTED
+
+The current issue-to-draft-PR path includes both supervised MVP behavior and
+implemented hardening. The diagram describes the executable workflow, not the
+MVP boundary. End-to-end verification is still pending.
 
 ```text
 GitHub issue
@@ -51,7 +70,10 @@ Checkpoint commits are local recovery boundaries. Only the final logical commit
 is pushed after the complete implementation passes validation and whole-plan
 review.
 
-## Agent-ready issue contract — PARTIAL
+## Agent-ready issue contract — PARTIAL · HARDENING
+
+A clear issue remains an input assumption for the supervised MVP. Strict,
+automatic enforcement of the issue contract is operational hardening.
 
 The workflow depends on the issue defining the product outcome clearly enough
 that the planner does not need to act as a product manager.
@@ -292,7 +314,10 @@ implementation attempt. Examples include:
 - the reviewer service is unavailable
 - the coder times out before producing a candidate
 
-#### Retry workspace isolation — IMPLEMENTED
+#### Retry workspace isolation — IMPLEMENTED · HARDENING
+
+Clean-workspace retry isolation is operational hardening. The supervised MVP
+requires bounded retries, but does not use isolation as an MVP completion gate.
 
 Every step must establish a baseline at the last approved commit:
 
@@ -359,13 +384,19 @@ The retry must remain constrained to:
 
 A failed attempt is diagnostic input, not permission to broaden the solution.
 
-#### Archived retry diagnostics — IMPLEMENTED
+#### Archived retry diagnostics — IMPLEMENTED · HARDENING
+
+Failed-attempt artifact preservation is operational hardening.
 
 The orchestrator archives the failed patch and diagnostics, resets the
 workspace to the step baseline, and gives the next coder attempt the archived
 patch as read-only context.
 
 ### Checkpoint commits and final logical history — IMPLEMENTED
+
+Local checkpoint commits and resumable progress are part of the supervised MVP.
+Provisional approval, whole-plan review, cross-step repair, and history
+rewriting are operational hardening.
 
 Step approval is provisional. A step-level reviewer proves that the current
 candidate satisfies the current step; it does not prove that the architecture
@@ -379,8 +410,8 @@ Approved steps therefore create **checkpoint commits**:
 - they may be rewritten or removed
 - they are not treated as final architectural decisions
 
-**Final whole-plan validation and review: IMPLEMENTED.** After the final
-checkpoint, the orchestrator runs the complete validation suite again and
+**Final whole-plan validation and review: IMPLEMENTED · HARDENING.** After the
+final checkpoint, the orchestrator runs the complete validation suite again and
 performs a whole-plan review over the diff from the original issue baseline.
 End-to-end verification is pending.
 
@@ -395,9 +426,9 @@ The whole-plan reviewer checks:
 - integration-level test coverage
 - unrelated scope growth
 
-**Isolated integration repair: IMPLEMENTED.** When final validation fails or
-the whole-plan reviewer requests changes, an integration repair attempt may
-revise code introduced by any checkpointed step.
+**Isolated integration repair: IMPLEMENTED · HARDENING.** When final
+validation fails or the whole-plan reviewer requests changes, an integration
+repair attempt may revise code introduced by any checkpointed step.
 The ordinary step boundaries no longer restrict that repair, but the original
 issue scope and acceptance criteria still apply.
 
@@ -418,8 +449,8 @@ checkpoint tip
 `MAX_FINAL_ATTEMPTS` bounds whole-plan repair attempts and defaults to
 `MAX_ATTEMPTS`.
 
-**Final logical history rewrite: IMPLEMENTED.** After final approval,
-checkpoint commits are replaced with one logical commit:
+**Final logical history rewrite: IMPLEMENTED · HARDENING.** After final
+approval, checkpoint commits are replaced with one logical commit:
 
 ```text
 git reset --soft <issue-baseline-sha>
@@ -433,7 +464,9 @@ reachable from the issue branch after finalization.
 
 ### Completion phase — IMPLEMENTED
 
-Branch push and create-or-update draft PR handling exist. Repeatable end-to-end
+Branch push and create-or-update draft PR handling define the supervised MVP
+outcome. Final whole-plan review, integration repair, and history rewriting are
+hardening stages in the current implementation. Repeatable end-to-end
 verification, including existing-PR reuse, is pending.
 
 After all steps are checkpointed:

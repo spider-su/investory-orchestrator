@@ -1,29 +1,47 @@
 # Investory Orchestrator Roadmap
 
+## Delivery boundary
+
+The delivery decision is explicit:
+
+- **Supervised MVP** is the basic human-started issue-to-draft-PR loop.
+- **Operational hardening** contains safeguards that reduce recovery and
+  unattended-operation risk.
+
+Implemented hardening may remain enabled in the current workflow, but it does
+not enlarge the MVP completion gate. Hardening must be verified before the
+orchestrator is considered production-ready or used unattended.
+
 ## Capability Status
 
 This table is the only authoritative project-status record in this document.
+The capability prefix identifies its delivery stage.
 
 | Capability | Implemented | Tested E2E | Production-ready |
 | --- | --- | --- | --- |
-| GitHub issue loading | Yes | No | No |
-| Repository-aware structured planning | Yes | No | No |
-| Isolated issue workspace and branch | Yes | No | No |
-| Dev Container startup and validation | Yes | No | No |
-| Multi-step execution | Yes | No | No |
-| Validation repair loop | Yes | No | No |
-| Reviewer repair loop | Yes | No | No |
-| Retry exhaustion and blocked state | Yes | No | No |
-| Local checkpoint commits | Yes | No | No |
-| Final logical history rewrite | Yes | No | No |
-| Stage-aware resume | Yes | No | No |
-| Issue branch push | Yes | No | No |
-| Draft PR creation or update | Yes | No | No |
-| Automatic issue-contract validation | No | No | No |
-| Graph and routing test coverage | No | No | No |
-| GitHub Actions independent validation | No | No | No |
-| Pluggable agent backends | No | No | No |
-| Sequential `agent-ready` queue | No | No | No |
+| **MVP:** GitHub issue loading | Yes | No | No |
+| **MVP:** Repository-aware structured planning | Yes | No | No |
+| **MVP:** Isolated issue workspace and branch | Yes | No | No |
+| **MVP:** Dev Container startup and validation | Yes | No | No |
+| **MVP:** Multi-step execution | Yes | No | No |
+| **MVP:** Validation repair loop | Yes | No | No |
+| **MVP:** Reviewer repair loop | Yes | No | No |
+| **MVP:** Retry exhaustion and blocked state | Yes | No | No |
+| **MVP:** Local checkpoint commits | Yes | No | No |
+| **MVP:** Stage-aware resume | Yes | No | No |
+| **MVP:** Issue branch push | Yes | No | No |
+| **MVP:** Draft PR creation or update | Yes | No | No |
+| **Hardening:** Failed-attempt artifact preservation | Yes | No | No |
+| **Hardening:** Clean-workspace retry isolation | Yes | No | No |
+| **Hardening:** Provisional checkpoint approval | Yes | No | No |
+| **Hardening:** Whole-plan architectural review | Yes | No | No |
+| **Hardening:** Cross-step integration repair | Yes | No | No |
+| **Hardening:** Final logical history rewrite | Yes | No | No |
+| **Hardening:** Automatic issue-contract validation | No | No | No |
+| **Hardening:** Graph and routing test coverage | No | No | No |
+| **Hardening:** GitHub Actions independent validation | No | No | No |
+| **Hardening:** Pluggable agent backends | No | No | No |
+| **Hardening:** Sequential `agent-ready` queue | No | No | No |
 
 Status definitions:
 
@@ -34,18 +52,19 @@ Status definitions:
 - **Production-ready**: the capability has sufficient independent validation,
   recovery behavior, and operational coverage for unattended use.
 
-The MVP is complete when every capability from **GitHub issue loading** through
-**Draft PR creation or update** is marked `Yes` for both **Implemented** and
-**Tested E2E**. Production readiness is tracked separately.
+The supervised MVP is complete when every capability prefixed **MVP:** is
+marked `Yes` for both **Implemented** and **Tested E2E**. Hardening capabilities
+do not block that milestone. Production readiness requires the applicable
+hardening capabilities to be implemented and verified.
 
 Update this table only when implementation or verification evidence changes.
 Do not add separate completion checklists or duplicate status summaries.
 
-## Implemented MVP Capability Specifications
+## Capability Specifications
 
-The sections below describe implemented MVP behavior. They are retained as
-acceptance specifications, not as project-status tracking. Verification status
-is maintained only in the capability table above.
+The sections below describe both supervised MVP and operational hardening
+behavior. They are acceptance specifications, not project-status tracking.
+Verification status is maintained only in the capability table above.
 
 ### 1. Multi-step execution
 
@@ -96,6 +115,13 @@ Allow the coder to fix validation and review failures.
 ---
 
 ### 3. Checkpoint commits and final logical history
+
+**Delivery stage**
+
+- Local checkpoint commits and resumable progress: **Supervised MVP**
+- Failed-attempt artifacts, clean retry isolation, provisional approvals,
+  whole-plan review, cross-step repair, and history rewriting:
+  **Operational hardening**
 
 **Goal**
 
@@ -225,10 +251,8 @@ Before declaring MVP complete, run these scenarios.
 - Issue contains two or more clear steps.
 - All coder changes pass on the first attempt.
 - Each approved step creates a local checkpoint commit.
-- Final whole-plan validation and review pass.
-- Checkpoint history is rewritten into one logical commit.
-- Only the final logical commit is pushed.
-- Draft PR is created.
+- The issue branch is pushed.
+- A draft PR is created.
 
 ### Scenario B — Validation retry
 
@@ -265,11 +289,48 @@ Before declaring MVP complete, run these scenarios.
 
 ---
 
+## Hardening Verification
+
+These scenarios do not block the supervised MVP milestone. They are required
+before unattended or production operation.
+
+### Scenario G — Isolated failed attempt
+
+- A coder attempt creates tracked and untracked changes, then fails validation.
+- The complete patch and diagnostics are archived.
+- The workspace is reset to the approved step baseline.
+- The next attempt receives only read-only diagnostic context.
+
+### Scenario H — Whole-plan repair
+
+- All individual steps pass their step reviews.
+- The whole-plan reviewer finds a cross-step architectural problem.
+- An integration repair may revise code introduced by earlier steps.
+- Final validation and whole-plan review pass after repair.
+
+### Scenario I — Final history rewrite
+
+- Local checkpoint commits exist for approved steps.
+- Final approval rewrites them into one logical commit.
+- Only the final logical commit is reachable from the pushed issue branch.
+- Checkpoint SHAs and attempt artifacts remain available for diagnostics.
+
+### Scenario J — Automatic issue preflight
+
+Run this scenario after automatic issue-contract validation is implemented.
+
+- An invalid issue is rejected before workspace creation and planning.
+- A valid issue continues through the supervised MVP workflow.
+
+---
+
 ## Priorities
 
 Status is maintained only in the Capability Status table. Current work should
-move the core MVP capabilities from `Tested E2E: No` to `Yes`, then address the
-production-readiness gaps.
+first move the supervised MVP capabilities from `Tested E2E: No` to `Yes`.
+Hardening verification may proceed in parallel, but it does not block the MVP
+milestone. Production readiness remains blocked until the applicable hardening
+capabilities are verified.
 
 ### Priority 1 — Prove and stabilize the MVP
 
