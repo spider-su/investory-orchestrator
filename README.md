@@ -1,11 +1,29 @@
 # Investory Orchestrator
 
-Investory Orchestrator turns an agent-ready GitHub issue into a validated draft
-pull request. It is a workflow and policy layer around coding agents, Git,
-GitHub, Dev Containers, and deterministic project validation.
+Investory Orchestrator turns a GitHub issue that an operator has manually
+confirmed as agent-ready into a validated draft pull request. It is a workflow
+and policy layer around coding agents, Git, GitHub, Dev Containers, and
+deterministic project validation.
 
 The orchestrator does not merge pull requests automatically. Human review
 remains the final approval step.
+
+## Current limitations
+
+- **Issue readiness is not validated automatically.** Before starting a run,
+  the operator must manually confirm that the issue satisfies the agent-ready
+  contract below. The current CLI does not reject an invalid issue before
+  workspace creation or planner invocation.
+- no major workflow capability is yet marked **VERIFIED**
+- issues are started manually from the CLI
+- there is no `agent-ready` queue runner yet
+- blocked output can still be verbose
+- graph routing needs dedicated automated tests
+- GitHub Actions is not yet the final independent validation gate
+- provider backends are not yet exposed through a common agent interface
+- Codex execution depends on available authentication and usage quota
+
+See [`ROADMAP.md`](ROADMAP.md) for planned stabilization and automation work.
 
 ## Capability status markers
 
@@ -46,7 +64,7 @@ implemented hardening. The diagram describes the executable workflow, not the
 MVP boundary. End-to-end verification is still pending.
 
 ```text
-GitHub issue
+operator-approved GitHub issue
 → issue workspace and branch
 → bounded repository context
 → structured implementation plan
@@ -72,8 +90,9 @@ review.
 
 ## Agent-ready issue contract — PARTIAL · HARDENING
 
-A clear issue remains an input assumption for the supervised MVP. Strict,
-automatic enforcement of the issue contract is operational hardening.
+For the current supervised workflow, **agent-ready** means manually reviewed
+and approved by the operator. Automatic enforcement of the issue contract is
+operational hardening.
 
 The workflow depends on the issue defining the product outcome clearly enough
 that the planner does not need to act as a product manager.
@@ -81,11 +100,10 @@ that the planner does not need to act as a product manager.
 An issue is considered **agent-ready** only when it contains the required
 sections below and all material product decisions have already been made.
 
-The issue structure and operator-enforced contract are implemented. The
-operator must still decide whether an issue satisfies the contract before
-starting a run. Automatic issue-contract validation and rejection are
-**PLANNED** and should run immediately after loading the issue, before creating
-a workspace or invoking the planner.
+The structure below defines the operator's manual preflight. The orchestrator
+does not currently validate or reject the issue before workspace creation or
+planner invocation. Automatic issue-contract validation and rejection are
+**PLANNED** and should run immediately after loading the issue.
 
 ### Required issue structure
 
@@ -236,6 +254,9 @@ The label is human approval to execute the issue. It must not bypass contract
 validation.
 
 ## Command line — IMPLEMENTED
+
+**Precondition:** the operator has manually checked the issue against the
+agent-ready contract above. The CLI does not perform this validation yet.
 
 Run a new workflow:
 
@@ -787,16 +808,3 @@ cd workspaces/issue-<number>
 git status
 git log --oneline --decorate -10
 ```
-
-## Current limitations
-
-- no major workflow capability is yet marked **VERIFIED**
-- issues are started manually from the CLI
-- there is no `agent-ready` queue runner yet
-- blocked output can still be verbose
-- graph routing needs dedicated automated tests
-- GitHub Actions is not yet the final independent validation gate
-- provider backends are not yet exposed through a common agent interface
-- Codex execution depends on available authentication and usage quota
-
-See [`ROADMAP.md`](ROADMAP.md) for planned stabilization and automation work.
