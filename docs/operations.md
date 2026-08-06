@@ -99,8 +99,14 @@ docker compose run --rm orchestrator \
 The thread ID is stable for the issue number. Resume loads the saved LangGraph
 checkpoint and continues from the persisted blocked stage.
 
-Do not use `--resume` to silently change product requirements. Update the issue
-explicitly and ensure the saved plan remains valid.
+When planning blocks on unresolved product questions, update the GitHub issue
+with the required decisions and then run `--resume`. The orchestrator reloads
+the issue, refreshes repository context, and creates a new implementation plan
+before coding starts.
+
+For all other blocked stages, do not use `--resume` to silently change product
+requirements. Update the issue explicitly only when the saved plan remains
+valid, or restart the workflow after explicit recovery.
 
 ## Blocked workflows
 

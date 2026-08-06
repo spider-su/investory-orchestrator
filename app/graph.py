@@ -165,13 +165,69 @@ def awaiting_user_input_node(
 ) -> dict:
     print("RESULT: USER INPUT REQUIRED")
 
-    for question in state["plan"].get(
+    questions = state["plan"].get(
         "open_questions",
         [],
-    ):
+    )
+
+    for question in questions:
         print(f"- {question}")
 
-    return {}
+    blocked_reason = (
+        "Planner requires user input before implementation can continue."
+    )
+
+    if questions:
+        blocked_reason = (
+            f"{blocked_reason}\n"
+            + "\n".join(f"- {question}" for question in questions)
+        )
+
+    return {
+        "workflow_status": "blocked",
+        "blocked_reason": blocked_reason,
+        "blocked_stage": "awaiting_user_input",
+        "error": "",
+    }
+
+
+def resume_from_for_stage(blocked_stage: str) -> str | None:
+    return {
+        "awaiting_user_input": "prepare_workspace",
+        "environment": "prepare_workspace",
+        "coder": "prepare_current_step",
+        "reviewer": "run_validation",
+        "prepare_final_review": "complete_step",
+        "final_integration_coder": "prepare_final_review",
+        "final_reviewer": "final_validation",
+        "finalize_history": "final_reviewer",
+        "push_branch": "workflow_complete",
+        "create_draft_pr": "push_branch",
+    }.get(blocked_stage)
+
+
+def reload_issue_for_planning(issue_number: int) -> dict:
+    client = GitHubAppClient()
+    issue = client.get_issue(issue_number)
+
+    print(f"Reloaded issue #{issue.number}: {issue.title}")
+
+    return {
+        "issue_title": issue.title,
+        "issue_body": issue.body or "",
+        "workflow_status": "planning",
+        "plan": {},
+        "plan_markdown": "",
+        "plan_published": False,
+        "planning_error": "",
+        "requires_user_input": False,
+        "steps": [],
+        "current_step": 0,
+        "completed_steps": [],
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
 
 
 def prepare_workspace_node(state: WorkflowState) -> dict:
@@ -1754,21 +1810,26 @@ def main() -> None:
                 f"{saved_state.get('final_attempt', 0)} before resuming."
             )
 
+        resume_updates = {
+            "workflow_status": "implementing",
+            "max_attempts": configured_max_attempts,
+            "max_final_attempts": configured_max_final_attempts,
+            "blocked_reason": "",
+            "blocked_stage": "",
+            "coder_error": "",
+            "review_error": "",
+            "final_review_error": "",
+            "error": "",
+        }
+
+        if blocked_stage == "awaiting_user_input":
+            resume_updates.update(
+                reload_issue_for_planning(args.issue)
+            )
+
         graph.update_state(
             config,
-            {
-                "workflow_status": "implementing",
-                "max_attempts": configured_max_attempts,
-                "max_final_attempts": (
-                    configured_max_final_attempts
-                ),
-                "blocked_reason": "",
-                "blocked_stage": "",
-                "coder_error": "",
-                "review_error": "",
-                "final_review_error": "",
-                "error": "",
-            },
+            resume_updates,
             as_node=resume_from,
         )
         graph.invoke(None, config=config)
