@@ -65,6 +65,7 @@ def create_plan(
     issue_number: int,
     issue_title: str,
     issue_body: str,
+    repository_context: str,
 ) -> ImplementationPlan:
     model = ChatOpenAI(
         model=os.getenv("PLANNER_MODEL", "gpt-5.4-mini"),
@@ -91,7 +92,12 @@ Title:
 Body:
 {issue_body or "No issue body was provided."}
 
+Repository context:
+{repository_context}
+
 Planning rules:
+- Answer repository-specific questions from the supplied repository context.
+- Ask the user only about product decisions that cannot be inferred safely.
 - Separate product requirements from technical details.
 - Do not invent behavior that is not supported by the issue.
 - Record uncertain assumptions explicitly.

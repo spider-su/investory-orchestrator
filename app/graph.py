@@ -20,6 +20,7 @@ from app.agents.reviewer import (
     review_to_markdown,
 )
 from app.github_client import GitHubAppClient
+from app.repository_context import collect_repository_context
 from app.state import WorkflowState
 from app.test_runner import (
     run_validation,
@@ -54,6 +55,7 @@ def planner_node(state: WorkflowState) -> dict:
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
             issue_body=state["issue_body"],
+            repository_context=state["repository_context"],
         )
     except PlannerError as error:
         message = str(error)
@@ -142,7 +144,7 @@ def route_after_plan_publication(
     if state["requires_user_input"]:
         return "awaiting_user_input"
 
-    return "prepare_workspace"
+    return "start_environment"
 
 
 def planning_failure_node(state: WorkflowState) -> dict:
@@ -180,6 +182,19 @@ def prepare_workspace_node(state: WorkflowState) -> dict:
         "workspace": str(workspace),
         "branch": branch,
     }
+
+
+def collect_repository_context_node(
+    state: WorkflowState,
+) -> dict:
+    workspace = Path(state["workspace"])
+    context = collect_repository_context(workspace)
+
+    print(
+        f"Repository context collected: {len(context)} characters"
+    )
+
+    return {"repository_context": context}
 
 
 def start_environment_node(state: WorkflowState) -> dict:
@@ -733,6 +748,10 @@ def build_graph():
         prepare_workspace_node,
     )
     builder.add_node(
+        "collect_repository_context",
+        collect_repository_context_node,
+    )
+    builder.add_node(
         "start_environment",
         start_environment_node,
     )
@@ -773,7 +792,12 @@ def build_graph():
     builder.add_node("cleanup", cleanup_node)
 
     builder.add_edge(START, "load_issue")
-    builder.add_edge("load_issue", "planner")
+    builder.add_edge("load_issue", "prepare_workspace")
+    builder.add_edge(
+        "prepare_workspace",
+        "collect_repository_context",
+    )
+    builder.add_edge("collect_repository_context", "planner")
 
     builder.add_conditional_edges(
         "planner",
@@ -788,18 +812,13 @@ def build_graph():
         "publish_plan",
         route_after_plan_publication,
         {
-            "prepare_workspace": "prepare_workspace",
+            "start_environment": "start_environment",
             "awaiting_user_input": "awaiting_user_input",
         },
     )
 
     builder.add_edge("planning_failure", END)
     builder.add_edge("awaiting_user_input", END)
-
-    builder.add_edge(
-        "prepare_workspace",
-        "start_environment",
-    )
 
     builder.add_conditional_edges(
         "start_environment",
@@ -915,6 +934,7 @@ def main() -> None:
         "issue_number": args.issue,
         "issue_title": "",
         "issue_body": "",
+        "repository_context": "",
         "workflow_status": "new",
         "plan": {},
         "plan_markdown": "",

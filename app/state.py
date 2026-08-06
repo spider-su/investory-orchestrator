@@ -50,6 +50,7 @@ class WorkflowState(TypedDict):
     issue_number: int
     issue_title: str
     issue_body: str
+    repository_context: str
 
     workflow_status: WorkflowStatus
 
