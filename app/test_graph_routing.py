@@ -15,6 +15,7 @@ from app.graph import (
     route_after_plan_publication,
     route_after_planner,
     route_after_prepare_final_review,
+    route_after_prepare_push_branch,
     route_after_push_branch,
     route_after_review_publication,
     route_after_reviewer,
@@ -255,6 +256,18 @@ class GraphRoutingTests(unittest.TestCase):
             "workflow_complete",
         )
 
+    def test_route_after_prepare_push_branch(self) -> None:
+        self.assertEqual(
+            route_after_prepare_push_branch({"workflow_status": "blocked"}),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_prepare_push_branch(
+                {"workflow_status": "publishing"}
+            ),
+            "push_branch",
+        )
+
     def test_route_after_push_branch(self) -> None:
         self.assertEqual(
             route_after_push_branch({"workflow_status": "blocked"}),
@@ -262,7 +275,7 @@ class GraphRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             route_after_push_branch({"workflow_status": "implementing"}),
-            "create_draft_pr",
+            "prepare_draft_pr",
         )
 
     def test_route_after_create_draft_pr(self) -> None:

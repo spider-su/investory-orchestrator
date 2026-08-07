@@ -75,7 +75,8 @@ the saved checkpoint for that issue.
 - No major workflow capability is yet marked **Verified E2E**.
 - Issues are started manually from the CLI.
 - There is no `agent-ready` queue runner.
-- Graph routing and resume paths need dedicated automated tests.
+- Conditional graph routing has focused unit coverage, but resume and
+  crash-boundary behavior still needs broader integration testing.
 - Remote branch push and draft-PR upsert persist write-ahead intent and
   reconcile uncertain completion before retrying. Local checkpoint commits and
   final history rewriting do not yet have equivalent operation records, so

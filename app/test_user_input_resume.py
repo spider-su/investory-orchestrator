@@ -7,8 +7,10 @@ from unittest.mock import patch
 from app.graph import (
     awaiting_user_input_node,
     reload_issue_for_planning,
+    resolve_resume_from,
     resume_from_for_stage,
 )
+from app.side_effects import prepare_push_intent
 
 
 class UserInputResumeTests(unittest.TestCase):
@@ -44,7 +46,41 @@ class UserInputResumeTests(unittest.TestCase):
             resume_from_for_stage("awaiting_user_input"),
             "prepare_workspace",
         )
+        self.assertEqual(
+            resolve_resume_from(
+                {"workflow_status": "blocked", "blocked_stage": "awaiting_user_input"}
+            ),
+            "prepare_workspace",
+        )
         self.assertIsNone(resume_from_for_stage("unknown"))
+
+    def test_prepared_remote_operation_can_resume_without_blocked_state(self) -> None:
+        state = {
+            "workflow_status": "publishing",
+            "side_effect_intent": prepare_push_intent(
+                issue_number=42,
+                branch="agent/issue-42",
+                target_sha="abc123",
+                expected_remote_sha="old123",
+            ),
+        }
+
+        self.assertEqual(
+            resolve_resume_from(state),
+            "prepare_push_branch",
+        )
+
+    def test_nonblocked_state_without_prepared_operation_cannot_resume(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "prepared remote side effect",
+        ):
+            resolve_resume_from(
+                {
+                    "workflow_status": "publishing",
+                    "side_effect_intent": {},
+                }
+            )
 
     def test_reload_issue_resets_planning_state(self) -> None:
         issue = SimpleNamespace(

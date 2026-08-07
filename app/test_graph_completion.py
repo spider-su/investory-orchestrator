@@ -8,6 +8,10 @@ from app.graph import (
     create_draft_pr_node,
     push_branch_node,
 )
+from app.side_effects import (
+    prepare_draft_pr_intent,
+    prepare_push_intent,
+)
 
 
 def build_state() -> dict:
@@ -31,6 +35,8 @@ def build_state() -> dict:
         "plan": {"summary": "Add agent test coverage."},
         "final_commit_sha": "abc123",
         "workflow_status": "implementing",
+        "side_effect_intent": {},
+        "side_effect_history": [],
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -51,10 +57,14 @@ class FakeGitHubClient:
     def __init__(self):
         self.open_pr = None
         self.created: list[dict[str, str]] = []
+        self.branch_heads: dict[str, str] = {}
 
     def find_open_pr_by_branch(self, branch: str):
         self.last_branch = branch
         return self.open_pr
+
+    def get_branch_head_sha(self, branch: str) -> str | None:
+        return self.branch_heads.get(branch)
 
     def create_draft_pr(
         self,
@@ -104,29 +114,51 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertEqual(result["steps"][0]["commit_sha"], None)
 
     def test_push_branch_node_returns_clear_state_on_success(self) -> None:
-        fake_client = object()
+        state = build_state()
+        state["side_effect_intent"] = prepare_push_intent(
+            issue_number=42,
+            branch="agent/issue-42",
+            target_sha="abc123",
+            expected_remote_sha=None,
+        )
+        fake_client = FakeGitHubClient()
+
+        def record_push(*args, **kwargs) -> None:
+            fake_client.branch_heads["agent/issue-42"] = "abc123"
 
         with patch("app.graph.GitHubAppClient", return_value=fake_client):
-            with patch("app.graph.push_branch") as push_branch_mock:
-                result = push_branch_node(build_state())
+            with patch(
+                "app.graph.push_branch",
+                side_effect=record_push,
+            ) as push_branch_mock:
+                result = push_branch_node(state)
 
         push_branch_mock.assert_called_once()
+        self.assertEqual(result["side_effect_intent"], {})
         self.assertEqual(
-            result,
-            {
-                "blocked_reason": "",
-                "blocked_stage": "",
-                "error": "",
-            },
+            result["side_effect_history"][0]["status"],
+            "completed",
         )
+        self.assertEqual(result["blocked_reason"], "")
+        self.assertEqual(result["blocked_stage"], "")
+        self.assertEqual(result["error"], "")
 
     def test_push_branch_node_blocks_on_runtime_error(self) -> None:
-        with patch("app.graph.GitHubAppClient", return_value=object()):
+        state = build_state()
+        state["side_effect_intent"] = prepare_push_intent(
+            issue_number=42,
+            branch="agent/issue-42",
+            target_sha="abc123",
+            expected_remote_sha=None,
+        )
+        fake_client = FakeGitHubClient()
+
+        with patch("app.graph.GitHubAppClient", return_value=fake_client):
             with patch(
                 "app.graph.push_branch",
                 side_effect=RuntimeError("push failed"),
             ):
-                result = push_branch_node(build_state())
+                result = push_branch_node(state)
 
         self.assertEqual(
             result,
@@ -139,10 +171,16 @@ class GraphCompletionTests(unittest.TestCase):
         )
 
     def test_create_draft_pr_node_creates_pr_and_marks_completed(self) -> None:
+        state = build_state()
+        state["side_effect_intent"] = prepare_draft_pr_intent(
+            issue_number=42,
+            branch="agent/issue-42",
+            target_sha="abc123",
+        )
         fake_client = FakeGitHubClient()
 
         with patch("app.graph.GitHubAppClient", return_value=fake_client):
-            result = create_draft_pr_node(build_state())
+            result = create_draft_pr_node(state)
 
         self.assertEqual(len(fake_client.created), 1)
         created = fake_client.created[0]
@@ -151,24 +189,31 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertIn("Closes #42", created["body"])
         self.assertIn("- [x] step-01: Add agent tests", created["body"])
         self.assertIn("Final commit: `abc123`", created["body"])
-        self.assertEqual(
-            result,
-            {
-                "workflow_status": "completed",
-                "pull_request_number": 7,
-                "pull_request_url": "https://example/pr/7",
-                "blocked_reason": "",
-                "blocked_stage": "",
-                "error": "",
-            },
+        self.assertIn(
+            state["side_effect_intent"]["operation_id"],
+            created["body"],
         )
+        self.assertEqual(result["workflow_status"], "completed")
+        self.assertEqual(result["pull_request_number"], 7)
+        self.assertEqual(result["pull_request_url"], "https://example/pr/7")
+        self.assertEqual(result["side_effect_intent"], {})
+        self.assertEqual(len(result["side_effect_history"]), 1)
+        self.assertEqual(result["blocked_reason"], "")
+        self.assertEqual(result["blocked_stage"], "")
+        self.assertEqual(result["error"], "")
 
     def test_create_draft_pr_node_updates_existing_pr(self) -> None:
+        state = build_state()
+        state["side_effect_intent"] = prepare_draft_pr_intent(
+            issue_number=42,
+            branch="agent/issue-42",
+            target_sha="abc123",
+        )
         fake_client = FakeGitHubClient()
         fake_client.open_pr = FakePullRequest(number=9, url="https://example/pr/9")
 
         with patch("app.graph.GitHubAppClient", return_value=fake_client):
-            result = create_draft_pr_node(build_state())
+            result = create_draft_pr_node(state)
 
         self.assertEqual(fake_client.last_branch, "agent/issue-42")
         self.assertEqual(fake_client.created, [])
@@ -177,6 +222,12 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertEqual(result["pull_request_url"], "https://example/pr/9")
 
     def test_create_draft_pr_node_blocks_on_runtime_error(self) -> None:
+        state = build_state()
+        state["side_effect_intent"] = prepare_draft_pr_intent(
+            issue_number=42,
+            branch="agent/issue-42",
+            target_sha="abc123",
+        )
         fake_client = FakeGitHubClient()
 
         with patch("app.graph.GitHubAppClient", return_value=fake_client):
@@ -185,7 +236,7 @@ class GraphCompletionTests(unittest.TestCase):
                 "find_open_pr_by_branch",
                 side_effect=RuntimeError("GitHub API failed"),
             ):
-                result = create_draft_pr_node(build_state())
+                result = create_draft_pr_node(state)
 
         self.assertEqual(
             result,

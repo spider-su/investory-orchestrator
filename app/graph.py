@@ -27,6 +27,12 @@ from app.retry_isolation import (
     current_head,
     workspace_has_changes,
 )
+from app.side_effects import (
+    complete_intent,
+    has_prepared_intent,
+    prepare_draft_pr_intent,
+    prepare_push_intent,
+)
 from app.state import WorkflowState
 from app.test_runner import (
     run_validation,
@@ -201,9 +207,41 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "final_integration_coder": "prepare_final_review",
         "final_reviewer": "final_validation",
         "finalize_history": "final_reviewer",
-        "push_branch": "workflow_complete",
-        "create_draft_pr": "push_branch",
+        "prepare_push_branch": "workflow_complete",
+        "push_branch": "prepare_push_branch",
+        "create_draft_pr": "prepare_draft_pr",
     }.get(blocked_stage)
+
+
+def resolve_resume_from(state: dict) -> str:
+    workflow_status = state.get("workflow_status")
+
+    if workflow_status == "blocked":
+        blocked_stage = state.get("blocked_stage", "")
+        resume_from = resume_from_for_stage(blocked_stage)
+
+        if resume_from is None:
+            raise RuntimeError(
+                "Blocked workflow does not contain a resumable stage. "
+                f"Blocked stage: {blocked_stage or 'missing'}"
+            )
+
+        return resume_from
+
+    if has_prepared_intent(state):
+        intent = state["side_effect_intent"]
+        resume_from = {
+            "push_branch": "prepare_push_branch",
+            "draft_pr_upsert": "prepare_draft_pr",
+        }.get(intent.get("kind"))
+
+        if resume_from is not None:
+            return resume_from
+
+    raise RuntimeError(
+        "Only blocked workflows or workflows with a prepared remote "
+        f"side effect can be resumed. Current status: {workflow_status}"
+    )
 
 
 def reload_issue_for_planning(issue_number: int) -> dict:
@@ -1162,15 +1200,123 @@ def workflow_complete_node(state: WorkflowState) -> dict:
     return {}
 
 
-def push_branch_node(state: WorkflowState) -> dict:
+def prepare_push_branch_node(state: WorkflowState) -> dict:
+    target_sha = state.get("final_commit_sha")
+
+    if not target_sha:
+        message = "Cannot prepare branch push without a final commit SHA."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_push_branch",
+            "error": message,
+        }
+
     try:
         client = GitHubAppClient()
+        expected_remote_sha = client.get_branch_head_sha(state["branch"])
+    except RuntimeError as error:
+        message = str(error)
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_push_branch",
+            "error": message,
+        }
+
+    intent = prepare_push_intent(
+        issue_number=state["issue_number"],
+        branch=state["branch"],
+        target_sha=target_sha,
+        expected_remote_sha=expected_remote_sha,
+    )
+
+    print(f"Prepared remote operation: {intent['operation_id']}")
+    return {
+        "workflow_status": "publishing",
+        "side_effect_intent": intent,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
+def route_after_prepare_push_branch(state: WorkflowState) -> str:
+    if state["workflow_status"] == "blocked":
+        return "blocked"
+
+    return "push_branch"
+
+
+def push_branch_node(state: WorkflowState) -> dict:
+    intent = state.get("side_effect_intent", {})
+
+    if (
+        intent.get("status") != "prepared"
+        or intent.get("kind") != "push_branch"
+    ):
+        message = "Branch push is missing a prepared side-effect intent."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "push_branch",
+            "error": message,
+        }
+
+    try:
+        client = GitHubAppClient()
+        branch = state["branch"]
+        target_sha = intent["target_sha"]
+        expected_remote_sha = (
+            intent.get("expected_remote_sha") or None
+        )
+        remote_sha = client.get_branch_head_sha(branch)
+
+        if remote_sha == target_sha:
+            history = complete_intent(
+                intent,
+                list(state.get("side_effect_history", [])),
+                remote_sha=remote_sha,
+                reconciled=True,
+            )
+            print(f"Reconciled already-pushed branch: {branch}")
+            return {
+                "workflow_status": "publishing",
+                "side_effect_intent": {},
+                "side_effect_history": history,
+                "blocked_reason": "",
+                "blocked_stage": "",
+                "error": "",
+            }
+
+        if remote_sha != expected_remote_sha:
+            expected_display = expected_remote_sha or "<absent>"
+            actual_display = remote_sha or "<absent>"
+            message = (
+                f"Remote branch '{branch}' moved from expected "
+                f"{expected_display} to {actual_display}; "
+                "refusing to overwrite it."
+            )
+            return {
+                "workflow_status": "blocked",
+                "blocked_reason": message,
+                "blocked_stage": "push_branch",
+                "error": message,
+            }
 
         push_branch(
             client,
             Path(state["workspace"]),
-            state["branch"],
+            branch,
+            expected_remote_sha=expected_remote_sha,
         )
+
+        remote_sha = client.get_branch_head_sha(branch)
+        if remote_sha != target_sha:
+            raise RuntimeError(
+                "Branch push returned successfully but the remote branch "
+                f"does not point at the intended commit {target_sha}."
+            )
     except RuntimeError as error:
         message = str(error)
         print("Push branch failed")
@@ -1183,8 +1329,18 @@ def push_branch_node(state: WorkflowState) -> dict:
             "error": message,
         }
 
+    history = complete_intent(
+        intent,
+        list(state.get("side_effect_history", [])),
+        remote_sha=remote_sha,
+        reconciled=False,
+    )
+
     print(f"Pushed branch: {state['branch']}")
     return {
+        "workflow_status": "publishing",
+        "side_effect_intent": {},
+        "side_effect_history": history,
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -1195,10 +1351,51 @@ def route_after_push_branch(state: WorkflowState) -> str:
     if state["workflow_status"] == "blocked":
         return "blocked"
 
-    return "create_draft_pr"
+    return "prepare_draft_pr"
+
+
+def prepare_draft_pr_node(state: WorkflowState) -> dict:
+    target_sha = state.get("final_commit_sha")
+
+    if not target_sha:
+        message = "Cannot prepare draft PR without a final commit SHA."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "create_draft_pr",
+            "error": message,
+        }
+
+    intent = prepare_draft_pr_intent(
+        issue_number=state["issue_number"],
+        branch=state["branch"],
+        target_sha=target_sha,
+    )
+    print(f"Prepared remote operation: {intent['operation_id']}")
+    return {
+        "workflow_status": "publishing",
+        "side_effect_intent": intent,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
 
 
 def create_draft_pr_node(state: WorkflowState) -> dict:
+    intent = state.get("side_effect_intent", {})
+
+    if (
+        intent.get("status") != "prepared"
+        or intent.get("kind") != "draft_pr_upsert"
+    ):
+        message = "Draft PR upsert is missing a prepared side-effect intent."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "create_draft_pr",
+            "error": message,
+        }
+
     try:
         client = GitHubAppClient()
 
@@ -1219,7 +1416,9 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
             "- Automated reviewer approved every step\n"
             "- Final whole-plan validation passed\n"
             "- Final whole-plan review approved the integrated change\n\n"
-            f"Final commit: `{state['final_commit_sha']}`\n"
+            f"Final commit: `{state['final_commit_sha']}`\n\n"
+            "<!-- investory-operation: "
+            f"{intent['operation_id']} -->\n"
         )
 
         pull_request = client.find_open_pr_by_branch(
@@ -1260,10 +1459,19 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
             "error": message,
         }
 
+    history = complete_intent(
+        intent,
+        list(state.get("side_effect_history", [])),
+        pull_request_number=pull_request.number,
+        pull_request_url=pull_request.html_url,
+    )
+
     return {
         "workflow_status": "completed",
         "pull_request_number": pull_request.number,
         "pull_request_url": pull_request.html_url,
+        "side_effect_intent": {},
+        "side_effect_history": history,
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -1432,7 +1640,9 @@ def build_graph():
         "workflow_complete",
         workflow_complete_node,
     )
+    builder.add_node("prepare_push_branch", prepare_push_branch_node)
     builder.add_node("push_branch", push_branch_node)
+    builder.add_node("prepare_draft_pr", prepare_draft_pr_node)
     builder.add_node("create_draft_pr", create_draft_pr_node)
     builder.add_node("blocked", blocked_node)
     builder.add_node("cleanup", cleanup_node)
@@ -1615,14 +1825,26 @@ def build_graph():
     )
 
     builder.add_edge("environment_failure", "blocked")
-    builder.add_edge("workflow_complete", "push_branch")
+    builder.add_edge("workflow_complete", "prepare_push_branch")
+    builder.add_conditional_edges(
+        "prepare_push_branch",
+        route_after_prepare_push_branch,
+        {
+            "push_branch": "push_branch",
+            "blocked": "blocked",
+        },
+    )
     builder.add_conditional_edges(
         "push_branch",
         route_after_push_branch,
         {
-            "create_draft_pr": "create_draft_pr",
+            "prepare_draft_pr": "prepare_draft_pr",
             "blocked": "blocked",
         },
+    )
+    builder.add_edge(
+        "prepare_draft_pr",
+        "create_draft_pr",
     )
     builder.add_conditional_edges(
         "create_draft_pr",
@@ -1723,6 +1945,8 @@ def main() -> None:
         "commit_sha": None,
         "pull_request_number": 0,
         "pull_request_url": "",
+        "side_effect_intent": {},
+        "side_effect_history": [],
         "ci_status": "not_started",
         "ci_run_id": 0,
         "ci_url": "",
@@ -1750,31 +1974,8 @@ def main() -> None:
 
         saved_state = dict(snapshot.values)
         workflow_status = saved_state.get("workflow_status")
-
-        if workflow_status != "blocked":
-            raise RuntimeError(
-                "Only blocked workflows can be resumed. "
-                f"Current status: {workflow_status}"
-            )
-
         blocked_stage = saved_state.get("blocked_stage", "")
-        resume_from = {
-            "environment": "prepare_workspace",
-            "coder": "prepare_current_step",
-            "reviewer": "run_validation",
-            "prepare_final_review": "complete_step",
-            "final_integration_coder": "prepare_final_review",
-            "final_reviewer": "final_validation",
-            "finalize_history": "final_reviewer",
-            "push_branch": "workflow_complete",
-            "create_draft_pr": "push_branch",
-        }.get(blocked_stage)
-
-        if resume_from is None:
-            raise RuntimeError(
-                "Blocked workflow does not contain a resumable stage. "
-                f"Blocked stage: {blocked_stage or 'missing'}"
-            )
+        resume_from = resolve_resume_from(saved_state)
 
         configured_max_attempts = int(
             os.getenv(

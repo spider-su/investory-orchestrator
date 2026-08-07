@@ -35,8 +35,8 @@ completion gate.
 | **Hardening:** Cross-step integration repair | Yes | No | No |
 | **Hardening:** Final logical history rewrite | Yes | No | No |
 | **Hardening:** Automatic issue-contract validation | No | No | No |
-| **Hardening:** Graph and routing test coverage | No | No | No |
-| **Hardening:** Side-effect intent and resume reconciliation | No | No | No |
+| **Hardening:** Complete graph and routing test coverage | No | No | No |
+| **Hardening:** Complete side-effect intent and resume reconciliation | No | No | No |
 | **Hardening:** Reviewer independence enforcement | No | No | No |
 | **Hardening:** GitHub Actions independent validation | No | No | No |
 | **Hardening:** Pluggable agent backends | No | No | No |
@@ -55,6 +55,11 @@ Implemented and Tested E2E. Production readiness requires applicable hardening
 to be implemented and verified.
 
 Update this table only when implementation or verification evidence changes.
+
+Partial hardening already exists: focused tests cover the current conditional
+graph routes, and write-ahead reconciliation is implemented for remote branch
+push and draft-PR upsert. The corresponding rows remain `No` until the complete
+hardening scope listed below is implemented and verified.
 
 ## Priority 1 — Verify the supervised MVP
 
