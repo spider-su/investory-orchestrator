@@ -142,6 +142,16 @@ class SideEffectReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(result["side_effect_intent"], {})
 
+    def test_prepare_draft_pr_blocks_without_final_commit(self) -> None:
+        state = base_state()
+        state["final_commit_sha"] = None
+
+        result = prepare_draft_pr_node(state)
+
+        self.assertEqual(result["workflow_status"], "blocked")
+        self.assertEqual(result["blocked_stage"], "prepare_draft_pr")
+        self.assertIn("final commit SHA", result["blocked_reason"])
+
     def test_pr_retry_updates_existing_pr_instead_of_creating(self) -> None:
         state = base_state()
         prepared = prepare_draft_pr_node(state)

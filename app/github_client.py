@@ -176,6 +176,27 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def update_pull_request(
+        self,
+        pull_request: PullRequest,
+        *,
+        title: str,
+        body: str,
+    ) -> PullRequest:
+        try:
+            pull_request.edit(
+                title=title,
+                body=body,
+            )
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to update pull request "
+                f"#{pull_request.number}: "
+                f"{error.status} {error.data}"
+            ) from error
+
+        return pull_request
+
     def find_open_pr_by_branch(
         self,
         branch: str,

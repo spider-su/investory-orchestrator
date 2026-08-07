@@ -3,6 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from github.GithubException import GithubException
+
+from app.github_client import GitHubAppClient
+
 from app.graph import (
     complete_step_node,
     create_draft_pr_node,
@@ -66,6 +70,16 @@ class FakeGitHubClient:
     def get_branch_head_sha(self, branch: str) -> str | None:
         return self.branch_heads.get(branch)
 
+    def update_pull_request(
+        self,
+        pull_request: FakePullRequest,
+        *,
+        title: str,
+        body: str,
+    ) -> FakePullRequest:
+        pull_request.edit(title=title, body=body)
+        return pull_request
+
     def create_draft_pr(
         self,
         *,
@@ -112,6 +126,25 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertEqual(result["steps"][0]["status"], "completed")
         self.assertEqual(result["steps"][0]["attempts"], 2)
         self.assertEqual(result["steps"][0]["commit_sha"], None)
+
+    def test_github_client_normalizes_pr_update_error(self) -> None:
+        client = GitHubAppClient.__new__(GitHubAppClient)
+        pull_request = FakePullRequest(number=9)
+
+        with patch.object(
+            pull_request,
+            "edit",
+            side_effect=GithubException(422, {"message": "invalid"}),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Failed to update pull request #9",
+            ):
+                client.update_pull_request(
+                    pull_request,
+                    title="Updated title",
+                    body="Updated body",
+                )
 
     def test_push_branch_node_returns_clear_state_on_success(self) -> None:
         state = build_state()
@@ -220,6 +253,32 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertEqual(len(fake_client.open_pr.edits), 1)
         self.assertEqual(result["pull_request_number"], 9)
         self.assertEqual(result["pull_request_url"], "https://example/pr/9")
+
+    def test_create_draft_pr_node_blocks_on_update_error(self) -> None:
+        state = build_state()
+        state["side_effect_intent"] = prepare_draft_pr_intent(
+            issue_number=42,
+            branch="agent/issue-42",
+            target_sha="abc123",
+        )
+        fake_client = FakeGitHubClient()
+        fake_client.open_pr = FakePullRequest(
+            number=9,
+            url="https://example/pr/9",
+        )
+
+        with patch("app.graph.GitHubAppClient", return_value=fake_client):
+            with patch.object(
+                fake_client,
+                "update_pull_request",
+                side_effect=RuntimeError("PR update failed"),
+            ):
+                result = create_draft_pr_node(state)
+
+        self.assertEqual(result["workflow_status"], "blocked")
+        self.assertEqual(result["blocked_stage"], "create_draft_pr")
+        self.assertEqual(result["blocked_reason"], "PR update failed")
+        self.assertEqual(result["error"], "PR update failed")
 
     def test_create_draft_pr_node_blocks_on_runtime_error(self) -> None:
         state = build_state()

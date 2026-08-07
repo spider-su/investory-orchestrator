@@ -461,8 +461,8 @@ requests.
 
 ## State model
 
-`app/state.py` defines the persisted `WorkflowState` contract using
-`TypedDict` and literal status values. Every field written by a graph node must
+`app/state.py` defines the persisted `WorkflowState` contract using `TypedDict`
+and string status aliases. Every field written by a graph node must
 be declared there and initialized by the graph entry point.
 
 Important state groups include issue metadata, workflow status, repository
@@ -478,6 +478,7 @@ app/
 ├── state.py
 ├── github_client.py
 ├── workspace.py
+├── side_effects.py
 ├── repository_context.py
 ├── test_runner.py
 └── agents/
@@ -494,6 +495,8 @@ app/
 - `app/github_client.py` — GitHub App authentication, issues, comments, and PRs
 - `app/workspace.py` — cloning, branches, Git identity, checkpoints, history
   rewriting, and authenticated push
+- `app/side_effects.py` — deterministic remote-operation IDs, prepared intent,
+  completion evidence, and reconciliation helpers
 - `app/repository_context.py` — bounded, read-only planning context
 - `app/test_runner.py` — Dev Container lifecycle and deterministic validation
 

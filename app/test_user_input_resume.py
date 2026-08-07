@@ -54,6 +54,11 @@ class UserInputResumeTests(unittest.TestCase):
         )
         self.assertIsNone(resume_from_for_stage("unknown"))
 
+    def test_prepare_draft_pr_resumes_from_push_predecessor(self) -> None:
+        self.assertEqual(
+            resume_from_for_stage("prepare_draft_pr"), "push_branch"
+        )
+
     def test_prepared_remote_operation_can_resume_without_blocked_state(self) -> None:
         state = {
             "workflow_status": "publishing",

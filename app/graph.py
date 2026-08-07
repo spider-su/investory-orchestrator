@@ -209,6 +209,7 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "finalize_history": "final_reviewer",
         "prepare_push_branch": "workflow_complete",
         "push_branch": "prepare_push_branch",
+        "prepare_draft_pr": "push_branch",
         "create_draft_pr": "prepare_draft_pr",
     }.get(blocked_stage)
 
@@ -1381,6 +1382,13 @@ def prepare_draft_pr_node(state: WorkflowState) -> dict:
     }
 
 
+def route_after_prepare_draft_pr(state: WorkflowState) -> str:
+    if state["workflow_status"] == "blocked":
+        return "blocked"
+
+    return "create_draft_pr"
+
+
 def create_draft_pr_node(state: WorkflowState) -> dict:
     intent = state.get("side_effect_intent", {})
 
@@ -1392,12 +1400,16 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
         return {
             "workflow_status": "blocked",
             "blocked_reason": message,
-            "blocked_stage": "create_draft_pr",
+            "blocked_stage": "prepare_draft_pr",
             "error": message,
         }
 
     try:
         client = GitHubAppClient()
+
+        title = (
+            f"Implement #{state['issue_number']}: {state['issue_title']}"
+        )
 
         completed_steps = "\n".join(
             f"- [x] {step['id']}: {step['title']}"
@@ -1427,21 +1439,16 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
 
         if pull_request is None:
             pull_request = client.create_draft_pr(
-                title=(
-                    f"Implement #{state['issue_number']}: "
-                    f"{state['issue_title']}"
-                ),
+                title=title,
                 body=body,
                 head=state["branch"],
                 base="main",
             )
             print(f"Created draft PR #{pull_request.number}")
         else:
-            pull_request.edit(
-                title=(
-                    f"Implement #{state['issue_number']}: "
-                    f"{state['issue_title']}"
-                ),
+            pull_request = client.update_pull_request(
+                pull_request,
+                title=title,
                 body=body,
             )
             print(f"Updated PR #{pull_request.number}")
@@ -1842,9 +1849,13 @@ def build_graph():
             "blocked": "blocked",
         },
     )
-    builder.add_edge(
+    builder.add_conditional_edges(
         "prepare_draft_pr",
-        "create_draft_pr",
+        route_after_prepare_draft_pr,
+        {
+            "create_draft_pr": "create_draft_pr",
+            "blocked": "blocked",
+        },
     )
     builder.add_conditional_edges(
         "create_draft_pr",
