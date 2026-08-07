@@ -237,6 +237,16 @@ docker compose run --rm orchestrator \
   app/graph.py
 ```
 
+Run the orchestrator test suite:
+
+```bash
+docker compose run --rm orchestrator \
+  python -m unittest discover -s tests -p 'test_*.py'
+```
+
+Both `app/` and `tests/` are bind-mounted by Compose, so local source and test
+edits are visible to this command without rebuilding the orchestrator image.
+
 Verify Codex inside the orchestrator container:
 
 ```bash
