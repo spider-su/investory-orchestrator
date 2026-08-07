@@ -108,6 +108,25 @@ For all other blocked stages, do not use `--resume` to silently change product
 requirements. Update the issue explicitly only when the saved plan remains
 valid, or restart the workflow after explicit recovery.
 
+### Remote side-effect recovery
+
+Before pushing a branch or creating/updating a draft pull request, the graph
+persists a deterministic operation ID and the expected remote state.
+
+On resume:
+
+- a branch already pointing at the intended final commit is treated as an
+  applied push;
+- an unchanged remote branch is retried with `--force-with-lease`;
+- a branch changed by another actor blocks instead of being overwritten;
+- an existing open pull request for the issue branch is updated rather than
+  duplicated.
+
+`--resume` also accepts an interrupted checkpoint whose prepared remote
+operation has not yet returned a normal blocked state. Local checkpoint commits
+and final history rewriting still require manual inspection after an uncertain
+process boundary.
+
 ## Blocked workflows
 
 A workflow blocks when an environment, coder, reviewer, validation, push, or PR

@@ -76,6 +76,9 @@ class WorkflowState(TypedDict):
     pull_request_number: int
     pull_request_url: str
 
+    side_effect_intent: dict[str, Any]
+    side_effect_history: list[dict[str, Any]]
+
     ci_status: CiStatus
     ci_run_id: int
     ci_url: str

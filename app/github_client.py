@@ -101,6 +101,22 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def get_branch_head_sha(
+        self,
+        branch_name: str,
+    ) -> str | None:
+        try:
+            branch = self.get_repository().get_branch(branch_name)
+            return branch.commit.sha
+        except GithubException as error:
+            if error.status == 404:
+                return None
+
+            raise RuntimeError(
+                f"Failed to inspect branch '{branch_name}': "
+                f"{error.status} {error.data}"
+            ) from error
+
     def create_branch(
         self,
         branch_name: str,

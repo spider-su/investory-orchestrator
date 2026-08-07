@@ -22,6 +22,7 @@ class FakeGitHubClient:
     def __init__(self) -> None:
         self.comments: list[str] = []
         self.created_pull_requests: list[dict[str, str]] = []
+        self.branch_heads: dict[str, str] = {}
 
     def get_issue(self, issue_number: int):
         return SimpleNamespace(
@@ -33,6 +34,9 @@ class FakeGitHubClient:
     def add_issue_comment(self, issue_number: int, body: str) -> int:
         self.comments.append(body)
         return len(self.comments)
+
+    def get_branch_head_sha(self, branch: str) -> str | None:
+        return self.branch_heads.get(branch)
 
     def find_open_pr_by_branch(self, branch: str):
         return None
@@ -107,6 +111,8 @@ def initial_state(issue_number: int) -> dict:
         "commit_sha": None,
         "pull_request_number": 0,
         "pull_request_url": "",
+        "side_effect_intent": {},
+        "side_effect_history": [],
         "ci_status": "not_started",
         "ci_run_id": 0,
         "ci_url": "",
@@ -237,8 +243,17 @@ class GraphEndToEndTests(unittest.TestCase):
                         return_value="final-sha",
                     )
                 )
+
+                def record_push(*args, **kwargs) -> None:
+                    fake_client.branch_heads[
+                        "agent/issue-42"
+                    ] = "final-sha"
+
                 push_mock = stack.enter_context(
-                    patch("app.graph.push_branch")
+                    patch(
+                        "app.graph.push_branch",
+                        side_effect=record_push,
+                    )
                 )
 
                 graph = build_graph()
@@ -271,6 +286,8 @@ class GraphEndToEndTests(unittest.TestCase):
         checkpoint_mock.assert_called_once()
         finalization_mock.assert_called_once()
         push_mock.assert_called_once()
+        self.assertEqual(len(result["side_effect_history"]), 2)
+        self.assertEqual(result["side_effect_intent"], {})
         self.assertEqual(len(fake_client.comments), 2)
         self.assertEqual(len(fake_client.created_pull_requests), 1)
         created_pr = fake_client.created_pull_requests[0]

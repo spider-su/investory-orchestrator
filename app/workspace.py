@@ -237,13 +237,24 @@ def push_branch(
     client: GitHubAppClient,
     workspace: Path,
     branch: str,
+    *,
+    expected_remote_sha: str | None = None,
 ) -> None:
     _mark_safe_directory(workspace)
 
     environment = _git_environment(client.token)
+    protected_ref = f"refs/heads/{branch}"
+    lease = expected_remote_sha or ""
 
     _run(
-        ["git", "push", "-u", "origin", branch],
+        [
+            "git",
+            "push",
+            "-u",
+            f"--force-with-lease={protected_ref}:{lease}",
+            "origin",
+            f"HEAD:{protected_ref}",
+        ],
         cwd=workspace,
         env=environment,
     )
