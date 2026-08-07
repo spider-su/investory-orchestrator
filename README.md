@@ -56,14 +56,14 @@ Run a new workflow:
 
 ```bash
 docker compose run --rm orchestrator \
-  python -m app.graph --issue <number>
+  python -m app --issue <number>
 ```
 
 Resume a blocked workflow:
 
 ```bash
 docker compose run --rm orchestrator \
-  python -m app.graph --issue <number> --resume
+  python -m app --issue <number> --resume
 ```
 
 A stable LangGraph thread ID is derived from the issue number, so resume loads

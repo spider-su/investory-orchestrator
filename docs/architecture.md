@@ -474,6 +474,8 @@ and blocked-stage information.
 
 ```text
 app/
+├── __main__.py
+├── cli.py
 ├── graph.py
 ├── state.py
 ├── github_client.py
@@ -489,6 +491,9 @@ app/
 
 ### Module responsibilities
 
+- `app/__main__.py` — package entry point for `python -m app`
+- `app/cli.py` — argument parsing, initial workflow state, checkpoint resume,
+  and top-level workflow invocation
 - `app/graph.py` — graph nodes, conditional routing, retries, step progression,
   checkpoints, finalization, push, PR handling, and terminal cleanup
 - `app/state.py` — persisted workflow contract

@@ -86,15 +86,18 @@ Run a new issue:
 
 ```bash
 docker compose run --rm orchestrator \
-  python -m app.graph --issue <number>
+  python -m app --issue <number>
 ```
 
 Resume a blocked issue:
 
 ```bash
 docker compose run --rm orchestrator \
-  python -m app.graph --issue <number> --resume
+  python -m app --issue <number> --resume
 ```
+
+`python -m app.graph` remains a compatibility entry point while the workflow
+implementation is split into smaller packages.
 
 The thread ID is stable for the issue number. Resume loads the saved LangGraph
 checkpoint and continues from the persisted blocked stage.
