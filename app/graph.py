@@ -1462,7 +1462,7 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
         return {
             "workflow_status": "blocked",
             "blocked_reason": message,
-            "blocked_stage": "create_draft_pr",
+            "blocked_stage": "prepare_draft_pr",
             "error": message,
         }
 
