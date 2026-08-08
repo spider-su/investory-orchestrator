@@ -11,6 +11,7 @@ services:
       - ./tests:/app/tests
       - ./data:/app/data
       - ${HOST_WORKSPACES_DIR:-./workspaces}:/app/workspaces
+      - ${HOST_CODEX_DIR:-./.codex}:/root/.codex:ro
       - /var/run/docker.sock:/var/run/docker.sock
 
     secrets:

@@ -80,6 +80,12 @@ class GraphRoutingTests(unittest.TestCase):
             ),
             "isolate_validation_failure",
         )
+        self.assertEqual(
+            route_after_validation(
+                {"validation_status": "environment_failure"}
+            ),
+            "environment_failure",
+        )
 
     def test_route_after_failed_attempt(self) -> None:
         self.assertEqual(
@@ -152,6 +158,15 @@ class GraphRoutingTests(unittest.TestCase):
         )
 
     def test_route_after_final_validation(self) -> None:
+        self.assertEqual(
+            route_after_final_validation(
+                {
+                    "final_validation_status": "environment_failure",
+                    "final_attempt": 0,
+                }
+            ),
+            "environment_failure",
+        )
         self.assertEqual(
             route_after_final_validation(
                 {
@@ -311,6 +326,17 @@ class GraphRoutingTests(unittest.TestCase):
                 }
             ),
             "push_branch",
+        )
+
+    def test_coder_resume_preserves_attempt_state(self) -> None:
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "blocked",
+                    "blocked_stage": "coder",
+                }
+            ),
+            "prepare_current_step",
         )
         self.assertEqual(
             resolve_resume_from(

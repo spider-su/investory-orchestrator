@@ -277,6 +277,8 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "environment": "prepare_workspace",
         "prepare_plan_comment": "prepare_plan_comment",
         "publish_plan": "publish_plan",
+        # Set the checkpoint as if preparation completed so LangGraph's next
+        # edge starts at coder without executing preparation a second time.
         "coder": "prepare_current_step",
         "reviewer": "run_validation",
         "prepare_review_comment": "prepare_review_comment",
@@ -573,6 +575,7 @@ def coder_node(state: WorkflowState) -> dict:
                 )
 
         return {
+            "attempt": next_attempt,
             "coder_summary": "",
             "coder_error": message,
             "coder_backend": coder_info["backend"],
@@ -636,6 +639,20 @@ def run_validation_node(state: WorkflowState) -> dict:
             "error": "",
         }
 
+    if result["status"] == "environment_failure":
+        print("Validation environment failed")
+        return {
+            "workflow_status": "validating",
+            "environment_output": result["output"],
+            "validation_status": "environment_failure",
+            "validation_exit_code": result["exit_code"],
+            "test_output": result["output"],
+            "tests_passed": False,
+            "blocked_reason": result["output"],
+            "blocked_stage": "environment",
+            "error": "",
+        }
+
     print("Project validation failed")
 
     return {
@@ -657,6 +674,9 @@ def run_validation_node(state: WorkflowState) -> dict:
 def route_after_validation(state: WorkflowState) -> str:
     if state["validation_status"] == "validation_success":
         return "reviewer"
+
+    if state["validation_status"] == "environment_failure":
+        return "environment_failure"
 
     return "isolate_validation_failure"
 
@@ -849,6 +869,8 @@ def reviewer_node(state: WorkflowState) -> dict:
     classification = review_classification(
         state.get("coder_model", ""),
         reviewer_info["model"],
+        coder_provider=state.get("coder_provider", ""),
+        reviewer_provider=reviewer_info["provider"],
     )
 
     try:
@@ -1208,6 +1230,19 @@ def final_validation_node(state: WorkflowState) -> dict:
             "error": "",
         }
 
+    if result["status"] == "environment_failure":
+        print("Final validation environment failed")
+        return {
+            "workflow_status": "validating",
+            "environment_output": result["output"],
+            "final_validation_status": "environment_failure",
+            "final_validation_exit_code": result["exit_code"],
+            "final_validation_output": result["output"],
+            "blocked_reason": result["output"],
+            "blocked_stage": "environment",
+            "error": "",
+        }
+
     print("Final validation failed")
     return {
         "workflow_status": "validating",
@@ -1219,6 +1254,9 @@ def final_validation_node(state: WorkflowState) -> dict:
 
 
 def route_after_final_validation(state: WorkflowState) -> str:
+    if state["final_validation_status"] == "environment_failure":
+        return "environment_failure"
+
     if (
         state["final_validation_status"]
         == "validation_success"
@@ -1352,6 +1390,8 @@ def final_reviewer_node(state: WorkflowState) -> dict:
     classification = review_classification(
         state.get("coder_model", ""),
         reviewer_info["model"],
+        coder_provider=state.get("coder_provider", ""),
+        reviewer_provider=reviewer_info["provider"],
     )
 
     try:
@@ -2162,6 +2202,7 @@ def build_graph():
             "isolate_validation_failure": (
                 "isolate_validation_failure"
             ),
+            "environment_failure": "environment_failure",
         },
     )
 
@@ -2224,6 +2265,7 @@ def build_graph():
             "isolate_final_validation_failure": (
                 "isolate_final_validation_failure"
             ),
+            "environment_failure": "environment_failure",
         },
     )
     builder.add_conditional_edges(

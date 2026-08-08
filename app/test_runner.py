@@ -120,12 +120,26 @@ class _BoundedOutput:
 def _read_output(stream: BinaryIO, output: _BoundedOutput) -> None:
     try:
         while True:
-            chunk = stream.read(8192)
+            try:
+                chunk = stream.read(8192)
+            except (OSError, ValueError):
+                return
             if not chunk:
                 return
             output.feed(chunk)
     finally:
         stream.close()
+
+
+def _finish_reader(reader: Thread, stream: BinaryIO) -> None:
+    """Avoid waiting indefinitely for a descendant holding stdout open."""
+    reader.join(timeout=5)
+    if reader.is_alive():
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+        reader.join(timeout=1)
 
 
 def _run(
@@ -169,15 +183,21 @@ def _run(
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_process_group(process)
-        reader.join(timeout=5)
+        _finish_reader(reader, process.stdout)
         output_text = output.text()
-        return 124, (
+        return 124, _limit_output(
             f"{output_text}\nCommand timed out after {timeout} seconds."
         )
 
-    reader.join()
+    _finish_reader(reader, process.stdout)
     output_text = output.text()
     return process.returncode, output_text or "(command produced no output)"
+
+
+def _is_environment_failure(exit_code: int) -> bool:
+    # 124 is the runner's timeout result; 127 is the conventional command or
+    # interpreter-not-found result. Neither represents a project test result.
+    return exit_code in {124, 127}
 
 
 def start_environment(
@@ -222,7 +242,11 @@ def run_validation(
         "status": (
             "success"
             if exit_code == 0
-            else "project_validation_failure"
+            else (
+                "environment_failure"
+                if _is_environment_failure(exit_code)
+                else "project_validation_failure"
+            )
         ),
         "success": exit_code == 0,
         "exit_code": exit_code,

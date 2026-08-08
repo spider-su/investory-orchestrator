@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.test_runner import (
     MAX_OUTPUT_LENGTH,
@@ -43,6 +43,28 @@ class TestRunnerTests(unittest.TestCase):
             timeout=1800,
         )
 
+    @patch(
+        "app.test_runner._run",
+        return_value=(127, "validation command missing"),
+    )
+    def test_validation_reports_environment_failure(self, run_mock) -> None:
+        result = run_validation(self.workspace, 42)
+
+        self.assertEqual(result["status"], "environment_failure")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["exit_code"], 127)
+
+    @patch(
+        "app.test_runner._run",
+        return_value=(124, "validation timed out"),
+    )
+    def test_validation_timeout_reports_environment_failure(self, run_mock) -> None:
+        result = run_validation(self.workspace, 42)
+
+        self.assertEqual(result["status"], "environment_failure")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["exit_code"], 124)
+
     @patch("app.test_runner._run", return_value=(127, "missing command"))
     def test_stop_environment_reports_environment_failure(self, run_mock) -> None:
         result = stop_environment(self.workspace, 42)
@@ -68,13 +90,33 @@ class TestRunnerTests(unittest.TestCase):
 
     def test_run_terminates_timed_out_command(self) -> None:
         exit_code, output = _run(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
+            [
+                sys.executable,
+                "-c",
+                "import time; print('x' * 200000, flush=True); time.sleep(30)",
+            ],
             workspace=Path.cwd(),
             timeout=0.1,
         )
 
         self.assertEqual(exit_code, 124)
         self.assertIn("Command timed out", output)
+        self.assertLessEqual(len(output), MAX_OUTPUT_LENGTH)
+
+    def test_reader_shutdown_is_bounded_for_inherited_pipe(self) -> None:
+        # A descendant retaining stdout can leave the reader blocked after the
+        # parent process exits. The shutdown path must close the stream rather
+        # than waiting forever for EOF.
+        from app.test_runner import _finish_reader
+
+        reader = Mock()
+        reader.is_alive.side_effect = [True, False]
+        stream = Mock()
+
+        _finish_reader(reader, stream)
+
+        reader.join.assert_any_call(timeout=5)
+        stream.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

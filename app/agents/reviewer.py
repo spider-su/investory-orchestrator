@@ -52,8 +52,24 @@ def review_identity() -> dict[str, str]:
 def review_classification(
     coder_model: str,
     reviewer_model: str,
+    *,
+    coder_provider: str = "",
+    reviewer_provider: str = "",
 ) -> str:
-    if coder_model and reviewer_model and coder_model != reviewer_model:
+    known_coder_identity = bool(coder_model and coder_provider)
+    known_reviewer_identity = bool(reviewer_model and reviewer_provider)
+    identities_differ = (
+        (coder_provider, coder_model)
+        != (reviewer_provider, reviewer_model)
+    )
+
+    if (
+        known_coder_identity
+        and known_reviewer_identity
+        and identities_differ
+        and coder_provider != "unknown"
+        and reviewer_provider != "unknown"
+    ):
         return "independent"
 
     return "secondary_automated_review"

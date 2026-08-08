@@ -102,9 +102,34 @@ class ReviewerTests(unittest.TestCase):
             "secondary_automated_review",
         )
         self.assertEqual(
-            review_classification("codex-model", "review-model"),
+            review_classification(
+                "codex-model",
+                "review-model",
+                coder_provider="codex",
+                reviewer_provider="openai",
+            ),
             "independent",
         )
+        self.assertEqual(
+            review_classification(
+                "codex-model",
+                "review-model",
+                coder_provider="unknown",
+                reviewer_provider="openai",
+            ),
+            "secondary_automated_review",
+        )
+        for reviewer_provider in ("", "unknown"):
+            with self.subTest(reviewer_provider=reviewer_provider):
+                self.assertEqual(
+                    review_classification(
+                        "codex-model",
+                        "review-model",
+                        coder_provider="codex",
+                        reviewer_provider=reviewer_provider,
+                    ),
+                    "secondary_automated_review",
+                )
 
     def test_review_identity_uses_reviewer_configuration(self) -> None:
         with patch.dict(

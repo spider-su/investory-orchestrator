@@ -8,11 +8,16 @@ from github.GithubException import GithubException
 from app.github_client import GitHubAppClient
 
 from app.graph import (
+    coder_node,
     cleanup_node,
     complete_step_node,
     create_draft_pr_node,
     push_branch_node,
+    resolve_resume_from,
+    route_after_validation,
+    run_validation_node,
 )
+from app.agents.coder import CoderError
 from app.side_effects import (
     prepare_draft_pr_intent,
     prepare_push_intent,
@@ -101,6 +106,84 @@ class FakeGitHubClient:
 
 
 class GraphCompletionTests(unittest.TestCase):
+    def test_coder_failure_persists_consumed_attempt(self) -> None:
+        state = {
+            "issue_number": 42,
+            "issue_title": "Attempt accounting",
+            "issue_body": "",
+            "workspace": "D:/projects/investory-orchestrator",
+            "steps": [{"id": "step-01", "title": "Implement"}],
+            "current_step": 0,
+            "attempt": 1,
+            "max_attempts": 3,
+            "test_output": "",
+            "review": {},
+            "last_failed_patch_path": "",
+            "attempt_artifacts": [],
+        }
+
+        with patch(
+            "app.graph.run_coder",
+            side_effect=CoderError("coder failed after editing"),
+        ):
+            with patch("app.graph.workspace_has_changes", return_value=True):
+                with patch(
+                    "app.graph.archive_and_reset_failed_attempt",
+                    return_value={"patch_path": "attempt-2.patch"},
+                ) as archive_mock:
+                    result = coder_node(state)
+
+        archive_mock.assert_called_once()
+        self.assertEqual(result["attempt"], 2)
+        self.assertEqual(
+            result["attempt_artifacts"],
+            [{"patch_path": "attempt-2.patch"}],
+        )
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "blocked",
+                    "blocked_stage": "coder",
+                    "attempt": result["attempt"],
+                }
+            ),
+            "prepare_current_step",
+        )
+
+    def test_validation_environment_failure_blocks_without_retry(self) -> None:
+        for exit_code, output in (
+            (127, "validation command missing"),
+            (124, "validation timed out"),
+        ):
+            with self.subTest(exit_code=exit_code):
+                state = {
+                    "workspace": "D:/projects/investory-orchestrator",
+                    "issue_number": 42,
+                    "attempt": 2,
+                }
+                with patch(
+                    "app.graph.run_validation",
+                    return_value={
+                        "status": "environment_failure",
+                        "success": False,
+                        "exit_code": exit_code,
+                        "output": output,
+                    },
+                ):
+                    result = run_validation_node(state)
+
+                self.assertEqual(
+                    result["validation_status"],
+                    "environment_failure",
+                )
+                self.assertEqual(result["blocked_stage"], "environment")
+                self.assertEqual(result["test_output"], output)
+                self.assertEqual(
+                    route_after_validation(result),
+                    "environment_failure",
+                )
+                self.assertEqual(state["attempt"], 2)
+
     def test_cleanup_failure_is_persisted_as_blocked_state(self) -> None:
         with patch(
             "app.graph.stop_environment",
