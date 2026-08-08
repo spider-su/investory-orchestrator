@@ -93,6 +93,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(updates["blocked_stage"], "")
         self.assertEqual(graph.invocations, [(None, config)])
 
+    def test_coder_resume_keeps_consumed_attempt(self) -> None:
+        saved_state = {
+            "workflow_status": "blocked",
+            "blocked_stage": "coder",
+            "max_attempts": 3,
+            "max_final_attempts": 3,
+            "attempt": 2,
+            "final_attempt": 0,
+        }
+        graph = FakeGraph(saved_state)
+        resolver = Mock(return_value="prepare_current_step")
+
+        run_cli(
+            build_graph=lambda: graph,
+            resolve_resume_from=resolver,
+            reload_issue_for_planning=Mock(),
+            argv=["--issue", "42", "--resume"],
+        )
+
+        self.assertEqual(graph.updates[0][2], "prepare_current_step")
+        self.assertNotIn("attempt", graph.updates[0][1])
+        self.assertEqual(saved_state["attempt"], 2)
+
     def test_build_initial_state_has_remote_operation_defaults(self) -> None:
         state = build_initial_state(7)
 
