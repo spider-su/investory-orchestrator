@@ -9,6 +9,20 @@ class CoderError(RuntimeError):
     pass
 
 
+def _coder_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in (
+        "GITHUB_APP_ID",
+        "GITHUB_INSTALLATION_ID",
+        "GITHUB_PRIVATE_KEY_PATH",
+        "GITHUB_REPOSITORY",
+        "GITHUB_TOKEN",
+    ):
+        environment.pop(name, None)
+
+    return environment
+
+
 def coder_identity() -> dict[str, str]:
     return {
         "backend": "codex-cli",
@@ -128,6 +142,7 @@ Return a concise implementation summary.
         result = subprocess.run(
             command,
             cwd=workspace,
+            env=_coder_environment(),
             input=prompt,
             text=True,
             stdout=subprocess.PIPE,

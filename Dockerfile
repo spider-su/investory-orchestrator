@@ -39,5 +39,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY scripts/orchestrator-entrypoint.sh /usr/local/bin/orchestrator-entrypoint
+RUN chmod 0755 /usr/local/bin/orchestrator-entrypoint
 
+ENTRYPOINT ["/usr/local/bin/orchestrator-entrypoint"]
 CMD ["python", "-m", "app", "--help"]

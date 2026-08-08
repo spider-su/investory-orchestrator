@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from app.test_runner import (
     MAX_OUTPUT_LENGTH,
+    _RunResult,
     _run,
     run_validation,
     start_environment,
@@ -65,6 +66,16 @@ class TestRunnerTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["exit_code"], 124)
 
+    @patch(
+        "app.test_runner._run",
+        return_value=_RunResult(127, "project validation failed"),
+    )
+    def test_validation_child_exit_code_is_project_failure(self, run_mock) -> None:
+        result = run_validation(self.workspace, 42)
+
+        self.assertEqual(result["status"], "project_validation_failure")
+        self.assertEqual(result["exit_code"], 127)
+
     @patch("app.test_runner._run", return_value=(127, "missing command"))
     def test_stop_environment_reports_environment_failure(self, run_mock) -> None:
         result = stop_environment(self.workspace, 42)
@@ -111,12 +122,10 @@ class TestRunnerTests(unittest.TestCase):
 
         reader = Mock()
         reader.is_alive.side_effect = [True, False]
-        stream = Mock()
 
-        _finish_reader(reader, stream)
+        _finish_reader(reader)
 
         reader.join.assert_any_call(timeout=5)
-        stream.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

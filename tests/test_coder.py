@@ -95,6 +95,8 @@ class CoderTests(unittest.TestCase):
         self.assertEqual(captured["cwd"], self.workspace)
         self.assertEqual(captured["timeout"], 1800)
         self.assertEqual(captured["stderr"], subprocess.STDOUT)
+        self.assertNotIn("GITHUB_PRIVATE_KEY_PATH", captured["env"])
+        self.assertNotIn("GITHUB_APP_ID", captured["env"])
 
         prompt = captured["input"]
         self.assertIn("Implement GitHub issue #42", prompt)

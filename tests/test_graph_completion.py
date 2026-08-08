@@ -150,6 +150,32 @@ class GraphCompletionTests(unittest.TestCase):
             "prepare_current_step",
         )
 
+    def test_coder_infrastructure_failure_does_not_consume_attempt(self) -> None:
+        state = {
+            "issue_number": 42,
+            "issue_title": "Attempt accounting",
+            "issue_body": "",
+            "workspace": "D:/projects/investory-orchestrator",
+            "steps": [{"id": "step-01", "title": "Implement"}],
+            "current_step": 0,
+            "attempt": 1,
+            "max_attempts": 3,
+            "test_output": "",
+            "review": {},
+            "last_failed_patch_path": "",
+            "attempt_artifacts": [],
+        }
+
+        with patch(
+            "app.graph.run_coder",
+            side_effect=CoderError("Codex authentication unavailable"),
+        ):
+            with patch("app.graph.workspace_has_changes", return_value=False):
+                result = coder_node(state)
+
+        self.assertEqual(result["attempt"], 1)
+        self.assertEqual(result["attempt_artifacts"], [])
+
     def test_validation_environment_failure_blocks_without_retry(self) -> None:
         for exit_code, output in (
             (127, "validation command missing"),

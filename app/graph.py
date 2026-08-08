@@ -547,8 +547,9 @@ def coder_node(state: WorkflowState) -> dict:
             "",
         )
         workspace = Path(state["workspace"])
+        candidate_produced = workspace_has_changes(workspace)
 
-        if workspace_has_changes(workspace):
+        if candidate_produced:
             try:
                 artifact = archive_and_reset_failed_attempt(
                     workspace=workspace,
@@ -575,7 +576,7 @@ def coder_node(state: WorkflowState) -> dict:
                 )
 
         return {
-            "attempt": next_attempt,
+            "attempt": next_attempt if candidate_produced else state["attempt"],
             "coder_summary": "",
             "coder_error": message,
             "coder_backend": coder_info["backend"],

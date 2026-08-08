@@ -68,14 +68,15 @@ identities are available and differ. Otherwise it labels the result
 
 ## Credentials
 
-When Codex CLI is used, mount the authenticated host Codex directory into the
-orchestrator container user's home. For a root container user:
+When Codex CLI is used, set `HOST_CODEX_DIR` to the authenticated host Codex
+directory. Compose mounts it read-only at `/root/.codex-source` and copies it
+into a writable container-local `/root/.codex` runtime directory at startup:
 
 ```yaml
 services:
   orchestrator:
     volumes:
-      - ${HOME}/.codex:/root/.codex
+      - ${HOST_CODEX_DIR}:/root/.codex-source:ro
 ```
 
 Do not commit API keys, GitHub private keys, Codex credentials, or generated

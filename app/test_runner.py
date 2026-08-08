@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 from typing import BinaryIO
@@ -17,6 +18,20 @@ CommandStatus = Literal[
     "environment_failure",
     "project_validation_failure",
 ]
+
+RunFailure = Literal["none", "spawn", "timeout"]
+
+
+@dataclass(frozen=True)
+class _RunResult:
+    exit_code: int
+    output: str
+    failure: RunFailure = "none"
+
+    def __iter__(self):
+        # Preserve the existing private helper's two-value unpacking contract.
+        yield self.exit_code
+        yield self.output
 
 
 class CommandResult(TypedDict):
@@ -131,15 +146,9 @@ def _read_output(stream: BinaryIO, output: _BoundedOutput) -> None:
         stream.close()
 
 
-def _finish_reader(reader: Thread, stream: BinaryIO) -> None:
+def _finish_reader(reader: Thread) -> None:
     """Avoid waiting indefinitely for a descendant holding stdout open."""
     reader.join(timeout=5)
-    if reader.is_alive():
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
-        reader.join(timeout=1)
 
 
 def _run(
@@ -147,7 +156,7 @@ def _run(
     *,
     workspace: Path,
     timeout: int,
-) -> tuple[int, str]:
+) -> _RunResult:
     process_options: dict[str, object] = {}
     if os.name == "nt":
         process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -164,12 +173,20 @@ def _run(
             **process_options,
         )
     except OSError as error:
-        return 127, f"Could not start command: {error}"
+        return _RunResult(
+            127,
+            f"Could not start command: {error}",
+            failure="spawn",
+        )
 
     if process.stdout is None:
         process.terminate()
         process.wait()
-        return 127, "Could not capture command output"
+        return _RunResult(
+            127,
+            "Could not capture command output",
+            failure="spawn",
+        )
 
     output = _BoundedOutput(MAX_OUTPUT_LENGTH)
     reader = Thread(
@@ -183,15 +200,22 @@ def _run(
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_process_group(process)
-        _finish_reader(reader, process.stdout)
+        _finish_reader(reader)
         output_text = output.text()
-        return 124, _limit_output(
-            f"{output_text}\nCommand timed out after {timeout} seconds."
+        return _RunResult(
+            124,
+            _limit_output(
+                f"{output_text}\nCommand timed out after {timeout} seconds."
+            ),
+            failure="timeout",
         )
 
-    _finish_reader(reader, process.stdout)
+    _finish_reader(reader)
     output_text = output.text()
-    return process.returncode, output_text or "(command produced no output)"
+    return _RunResult(
+        process.returncode,
+        output_text or "(command produced no output)",
+    )
 
 
 def _is_environment_failure(exit_code: int) -> bool:
@@ -204,7 +228,7 @@ def start_environment(
     workspace: Path,
     issue_number: int,
 ) -> CommandResult:
-    exit_code, output = _run(
+    run_result = _run(
         [
             "bash",
             "scripts/agent-devcontainer.sh",
@@ -215,6 +239,7 @@ def start_environment(
         timeout=1800,
     )
 
+    exit_code, output = run_result
     return {
         "status": "success" if exit_code == 0 else "environment_failure",
         "success": exit_code == 0,
@@ -227,7 +252,7 @@ def run_validation(
     workspace: Path,
     issue_number: int,
 ) -> CommandResult:
-    exit_code, output = _run(
+    run_result = _run(
         [
             "bash",
             "scripts/agent-devcontainer.sh",
@@ -238,13 +263,21 @@ def run_validation(
         timeout=1800,
     )
 
+    exit_code, output = run_result
+    failure = getattr(run_result, "failure", None)
+    environment_failure = (
+        failure in {"spawn", "timeout"}
+        if failure is not None
+        else _is_environment_failure(exit_code)
+    )
+
     return {
         "status": (
             "success"
             if exit_code == 0
             else (
                 "environment_failure"
-                if _is_environment_failure(exit_code)
+                if environment_failure
                 else "project_validation_failure"
             )
         ),
@@ -258,7 +291,7 @@ def stop_environment(
     workspace: Path,
     issue_number: int,
 ) -> CommandResult:
-    exit_code, output = _run(
+    run_result = _run(
         [
             "bash",
             "scripts/agent-devcontainer.sh",
@@ -269,6 +302,7 @@ def stop_environment(
         timeout=300,
     )
 
+    exit_code, output = run_result
     return {
         "status": "success" if exit_code == 0 else "environment_failure",
         "success": exit_code == 0,
