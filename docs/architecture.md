@@ -90,6 +90,12 @@ attempt. Examples include unavailable authentication, provider outage, Dev
 Container startup failure, reviewer failure, or a coder timeout before a
 candidate is produced.
 
+Target adapters return an explicit `success`, `project_validation_failure`, or
+`environment_failure` result. Process spawning and timeout handling remain in
+the runner, while a target adapter interprets its repository-specific protocol.
+Validation routing uses the explicit result: only
+`project_validation_failure` enters the coder retry loop.
+
 ## Review independence
 
 Automated review has two separate layers:

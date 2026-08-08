@@ -31,6 +31,7 @@ MAX_ATTEMPTS=3
 MAX_FINAL_ATTEMPTS=3
 PUBLISH_PLAN_COMMENT=true
 PUBLISH_REVIEW_COMMENT=true
+TARGET_ADAPTER=devcontainer_script
 AGENT_DEVCONTAINER_SCRIPT=scripts/agent-devcontainer.sh
 ```
 
@@ -270,8 +271,25 @@ The target repository should provide:
   `AGENT_DEVCONTAINER_SCRIPT`
 - support in that script for `up <issue-number>`, `validate <issue-number>`,
   and `down <issue-number>` actions
+- accept `--result-file <absolute-path>` for every action and atomically write
+  a JSON result containing `status`, `exit_code`, and optional `message`
 - validation that exits non-zero on failure
 - a default branch compatible with the configured PR base
+
+`TARGET_ADAPTER` selects the target integration. The only supported value is
+currently `devcontainer_script`.
+
+The script result `status` must be exactly one of:
+
+- `success`
+- `project_validation_failure`
+- `environment_failure`
+
+The script's reported `exit_code` must match its process exit code. The runner
+classifies process spawn failures, timeouts, missing or malformed result files,
+and protocol violations as `environment_failure`. It never infers validation
+meaning from the process exit code; only the structured result controls whether
+the workflow retries the coder.
 
 The current Investory target uses a Dev Container and Maven-based validation.
 
