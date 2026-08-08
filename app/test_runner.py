@@ -11,6 +11,8 @@ from typing import Literal, TypedDict
 
 
 MAX_OUTPUT_LENGTH = 100_000
+DEFAULT_DEVCONTAINER_SCRIPT = Path("scripts/agent-devcontainer.sh")
+DEVCONTAINER_SCRIPT_ENVIRONMENT_VARIABLE = "AGENT_DEVCONTAINER_SCRIPT"
 
 
 CommandStatus = Literal[
@@ -19,7 +21,7 @@ CommandStatus = Literal[
     "project_validation_failure",
 ]
 
-RunFailure = Literal["none", "spawn", "timeout"]
+RunFailure = Literal["none", "spawn", "timeout", "preflight"]
 
 
 @dataclass(frozen=True)
@@ -143,12 +145,21 @@ def _read_output(stream: BinaryIO, output: _BoundedOutput) -> None:
                 return
             output.feed(chunk)
     finally:
-        stream.close()
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
 
 
-def _finish_reader(reader: Thread) -> None:
+def _finish_reader(reader: Thread, stream: BinaryIO) -> None:
     """Avoid waiting indefinitely for a descendant holding stdout open."""
     reader.join(timeout=5)
+    if reader.is_alive():
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+        reader.join(timeout=1)
 
 
 def _run(
@@ -200,7 +211,7 @@ def _run(
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_process_group(process)
-        _finish_reader(reader)
+        _finish_reader(reader, process.stdout)
         output_text = output.text()
         return _RunResult(
             124,
@@ -210,7 +221,7 @@ def _run(
             failure="timeout",
         )
 
-    _finish_reader(reader)
+    _finish_reader(reader, process.stdout)
     output_text = output.text()
     return _RunResult(
         process.returncode,
@@ -224,18 +235,68 @@ def _is_environment_failure(exit_code: int) -> bool:
     return exit_code in {124, 127}
 
 
+def _devcontainer_script(workspace: Path) -> Path:
+    configured_path = Path(
+        os.getenv(
+            DEVCONTAINER_SCRIPT_ENVIRONMENT_VARIABLE,
+            str(DEFAULT_DEVCONTAINER_SCRIPT),
+        )
+    )
+    return (
+        configured_path
+        if configured_path.is_absolute()
+        else workspace / configured_path
+    )
+
+
+def _run_devcontainer_action(
+    action: Literal["up", "validate", "down"],
+    *,
+    workspace: Path,
+    issue_number: int,
+    timeout: int,
+) -> _RunResult:
+    script = _devcontainer_script(workspace)
+    if not script.is_file():
+        return _RunResult(
+            127,
+            (
+                "Dev Container command script was not found: "
+                f"{script}. Configure "
+                f"{DEVCONTAINER_SCRIPT_ENVIRONMENT_VARIABLE} or add "
+                "the required target-repository script."
+            ),
+            failure="preflight",
+        )
+
+    shell_check = _run(
+        ["bash", "-c", "exit 0"],
+        workspace=workspace,
+        timeout=30,
+    )
+    if shell_check.exit_code != 0:
+        return _RunResult(
+            shell_check.exit_code,
+            "Could not initialize bash for Dev Container commands:\n"
+            f"{shell_check.output}",
+            failure="preflight",
+        )
+
+    return _run(
+        ["bash", str(script), action, str(issue_number)],
+        workspace=workspace,
+        timeout=timeout,
+    )
+
+
 def start_environment(
     workspace: Path,
     issue_number: int,
 ) -> CommandResult:
-    run_result = _run(
-        [
-            "bash",
-            "scripts/agent-devcontainer.sh",
-            "up",
-            str(issue_number),
-        ],
+    run_result = _run_devcontainer_action(
+        "up",
         workspace=workspace,
+        issue_number=issue_number,
         timeout=1800,
     )
 
@@ -252,21 +313,17 @@ def run_validation(
     workspace: Path,
     issue_number: int,
 ) -> CommandResult:
-    run_result = _run(
-        [
-            "bash",
-            "scripts/agent-devcontainer.sh",
-            "validate",
-            str(issue_number),
-        ],
+    run_result = _run_devcontainer_action(
+        "validate",
         workspace=workspace,
+        issue_number=issue_number,
         timeout=1800,
     )
 
     exit_code, output = run_result
     failure = getattr(run_result, "failure", None)
     environment_failure = (
-        failure in {"spawn", "timeout"}
+        failure in {"spawn", "timeout", "preflight"}
         if failure is not None
         else _is_environment_failure(exit_code)
     )
@@ -291,14 +348,10 @@ def stop_environment(
     workspace: Path,
     issue_number: int,
 ) -> CommandResult:
-    run_result = _run(
-        [
-            "bash",
-            "scripts/agent-devcontainer.sh",
-            "down",
-            str(issue_number),
-        ],
+    run_result = _run_devcontainer_action(
+        "down",
         workspace=workspace,
+        issue_number=issue_number,
         timeout=300,
     )
 

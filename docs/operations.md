@@ -31,6 +31,7 @@ MAX_ATTEMPTS=3
 MAX_FINAL_ATTEMPTS=3
 PUBLISH_PLAN_COMMENT=true
 PUBLISH_REVIEW_COMMENT=true
+AGENT_DEVCONTAINER_SCRIPT=scripts/agent-devcontainer.sh
 ```
 
 Planner and reviewer settings may target OpenAI, Azure OpenAI, or an
@@ -264,7 +265,11 @@ The target repository should provide:
 
 - `AGENTS.md` with repository-specific agent rules
 - `.devcontainer/devcontainer.json`
-- a deterministic validation entry point
+- a Dev Container command script at
+  `scripts/agent-devcontainer.sh`, or a path configured through
+  `AGENT_DEVCONTAINER_SCRIPT`
+- support in that script for `up <issue-number>`, `validate <issue-number>`,
+  and `down <issue-number>` actions
 - validation that exits non-zero on failure
 - a default branch compatible with the configured PR base
 
