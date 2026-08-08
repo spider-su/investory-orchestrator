@@ -93,6 +93,7 @@ class PlannerTests(unittest.TestCase):
                 issue_number=27,
                 issue_title="Add agent tests",
                 issue_body="Cover planner, coder, and reviewer.",
+                repository_context="Repository context.",
             )
 
         fake_model = FakeChatOpenAI.last_instance
@@ -118,6 +119,7 @@ class PlannerTests(unittest.TestCase):
                 issue_number=11,
                 issue_title="Handle empty issue body",
                 issue_body="",
+                repository_context="Repository context.",
             )
 
         fake_model = FakeChatOpenAI.last_instance
@@ -149,6 +151,7 @@ class PlannerTests(unittest.TestCase):
                     issue_number=5,
                     issue_title="Planner failure",
                     issue_body="",
+                    repository_context="Repository context.",
                 )
 
         self.assertIn(
@@ -165,6 +168,7 @@ class PlannerTests(unittest.TestCase):
                     issue_number=5,
                     issue_title="Unexpected planner output",
                     issue_body="",
+                    repository_context="Repository context.",
                 )
 
         self.assertIn(

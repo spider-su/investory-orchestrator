@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.workspace import commit_step
+from types import SimpleNamespace
+
+from app.workspace import (
+    _validate_existing_workspace,
+    commit_step,
+)
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -41,6 +46,54 @@ class WorkspaceTests(unittest.TestCase):
             )
 
         self.assertIsNone(commit_sha)
+
+    def test_existing_workspace_requires_matching_origin_and_clean_tree(self) -> None:
+        workspace = Path("D:/projects/investory-orchestrator/workspaces/issue-1")
+        client = SimpleNamespace(repository_name="owner/repository")
+
+        with patch(
+            "app.workspace._run",
+            side_effect=[
+                "agent/issue-1\n",
+                "https://github.com/owner/repository.git\n",
+                "",
+            ],
+        ):
+            _validate_existing_workspace(
+                workspace,
+                client=client,
+                branch="agent/issue-1",
+            )
+
+        with patch(
+            "app.workspace._run",
+            side_effect=[
+                "agent/issue-1\n",
+                "https://github.com/other/repository.git\n",
+                "",
+            ],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "origin"):
+                _validate_existing_workspace(
+                    workspace,
+                    client=client,
+                    branch="agent/issue-1",
+                )
+
+        with patch(
+            "app.workspace._run",
+            side_effect=[
+                "agent/issue-1\n",
+                "https://github.com/owner/repository.git\n",
+                " M app.py\n",
+            ],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "uncommitted"):
+                _validate_existing_workspace(
+                    workspace,
+                    client=client,
+                    branch="agent/issue-1",
+                )
 
 
 if __name__ == "__main__":

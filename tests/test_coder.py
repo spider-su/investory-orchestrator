@@ -76,6 +76,7 @@ class CoderTests(unittest.TestCase):
                         review_feedback={"status": "changes_required"},
                         attempt=2,
                         max_attempts=3,
+                        failed_patch_path="",
                     )
 
         self.assertEqual(summary, "Implemented tests for agents.")
@@ -84,8 +85,9 @@ class CoderTests(unittest.TestCase):
             [
                 "codex",
                 "exec",
-                "--ephemeral",
-                "--full-auto",
+                "--sandbox",
+                "workspace-write",
+                "-",
                 "--model",
                 "gpt-coder",
             ],
@@ -123,6 +125,7 @@ class CoderTests(unittest.TestCase):
                         review_feedback={},
                         attempt=1,
                         max_attempts=3,
+                        failed_patch_path="",
                     )
 
         self.assertIn("Coder timed out after 1800 seconds.", str(context.exception))
@@ -145,6 +148,7 @@ class CoderTests(unittest.TestCase):
                         review_feedback={},
                         attempt=1,
                         max_attempts=3,
+                        failed_patch_path="",
                     )
 
         self.assertIn("Could not start Codex CLI: missing codex", str(context.exception))
@@ -169,6 +173,7 @@ class CoderTests(unittest.TestCase):
                         review_feedback={},
                         attempt=1,
                         max_attempts=3,
+                        failed_patch_path="",
                     )
 
         self.assertIn("Codex failed with exit code 2", str(context.exception))

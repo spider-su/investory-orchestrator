@@ -101,6 +101,39 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def upsert_issue_comment(
+        self,
+        issue_number: int,
+        body: str,
+        *,
+        marker: str,
+    ) -> int:
+        try:
+            issue = self.get_issue(issue_number)
+            matches = [
+                comment
+                for comment in issue.get_comments()
+                if marker in (comment.body or "")
+            ]
+
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"Multiple issue comments contain marker '{marker}' "
+                    f"for issue #{issue_number}"
+                )
+
+            if matches:
+                matches[0].edit(body)
+                return matches[0].id
+
+            comment = issue.create_comment(body)
+            return comment.id
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to upsert comment on issue #{issue_number}: "
+                f"{error.status} {error.data}"
+            ) from error
+
     def get_branch_head_sha(
         self,
         branch_name: str,

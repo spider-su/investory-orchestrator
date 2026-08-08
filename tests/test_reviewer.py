@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
@@ -77,6 +78,7 @@ class ReviewerTests(unittest.TestCase):
                 "committed diff",
                 "staged diff",
                 "uncommitted diff",
+                "",
             ],
         ):
             diff = _branch_diff(self.workspace)
@@ -91,11 +93,28 @@ class ReviewerTests(unittest.TestCase):
     def test_branch_diff_returns_default_message_without_changes(self) -> None:
         with patch(
             "app.agents.reviewer._run_git",
-            side_effect=["  ", "", "\n"],
+            side_effect=["  ", "", "\n", ""],
         ):
             diff = _branch_diff(self.workspace)
 
         self.assertEqual(diff, "No changes compared with origin/main.")
+
+    def test_branch_diff_includes_untracked_file_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "new.py").write_text(
+                "print('new')\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "app.agents.reviewer._run_git",
+                side_effect=["", "", "", "new.py"],
+            ):
+                diff = _branch_diff(workspace)
+
+        self.assertIn("## Untracked file: new.py", diff)
+        self.assertIn("print('new')", diff)
 
     def test_review_implementation_returns_structured_review(self) -> None:
         expected_review = build_review()

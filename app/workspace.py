@@ -52,6 +52,23 @@ def _git_environment(token: str) -> dict[str, str]:
 
 
 def _mark_safe_directory(workspace: Path) -> None:
+    resolved_workspace = str(workspace.resolve())
+    existing = subprocess.run(
+        [
+            "git",
+            "config",
+            "--global",
+            "--get-all",
+            "safe.directory",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    if resolved_workspace in existing.stdout.splitlines():
+        return
+
     subprocess.run(
         [
             "git",
@@ -59,7 +76,7 @@ def _mark_safe_directory(workspace: Path) -> None:
             "--global",
             "--add",
             "safe.directory",
-            str(workspace),
+            resolved_workspace,
         ],
         check=True,
         text=True,
@@ -84,6 +101,59 @@ def _configure_git_identity(workspace: Path) -> None:
     )
 
 
+def _repository_name(remote_url: str) -> str:
+    normalized = remote_url.strip().removesuffix("/")
+
+    if normalized.startswith("git@github.com:"):
+        normalized = normalized.removeprefix("git@github.com:")
+    elif "github.com/" in normalized:
+        normalized = normalized.split("github.com/", 1)[1]
+
+    return normalized.removesuffix(".git")
+
+
+def _validate_existing_workspace(
+    workspace: Path,
+    *,
+    client: GitHubAppClient,
+    branch: str,
+) -> None:
+    current_branch = _run(
+        ["git", "branch", "--show-current"],
+        cwd=workspace,
+    ).strip()
+
+    if current_branch != branch:
+        raise RuntimeError(
+            f"Existing workspace uses branch "
+            f"'{current_branch}', expected '{branch}'"
+        )
+
+    remote_url = _run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=workspace,
+    ).strip()
+    expected_repository = client.repository_name.removesuffix(".git")
+
+    if _repository_name(remote_url) != expected_repository:
+        raise RuntimeError(
+            "Existing workspace origin does not match configured "
+            f"repository '{client.repository_name}': {remote_url}"
+        )
+
+    status = _run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=workspace,
+    ).strip()
+
+    if status:
+        raise RuntimeError(
+            "Existing workspace contains uncommitted changes; "
+            "refusing to reuse it.\n"
+            f"{status}"
+        )
+
+
 def prepare_workspace(
     client: GitHubAppClient,
     issue_number: int,
@@ -101,16 +171,11 @@ def prepare_workspace(
     if workspace.exists():
         _mark_safe_directory(workspace)
 
-        current_branch = _run(
-            ["git", "branch", "--show-current"],
-            cwd=workspace,
-        ).strip()
-
-        if current_branch != branch:
-            raise RuntimeError(
-                f"Existing workspace uses branch "
-                f"'{current_branch}', expected '{branch}'"
-            )
+        _validate_existing_workspace(
+            workspace,
+            client=client,
+            branch=branch,
+        )
 
         _configure_git_identity(workspace)
         return workspace, branch
@@ -144,8 +209,22 @@ def prepare_workspace(
 def commit_changes(
     workspace: Path,
     message: str,
+    *,
+    expected_parent_sha: str | None = None,
 ) -> str | None:
     _mark_safe_directory(workspace)
+
+    if expected_parent_sha is not None:
+        actual_parent_sha = _run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+        ).strip()
+
+        if actual_parent_sha != expected_parent_sha:
+            raise RuntimeError(
+                "Workspace HEAD changed before checkpoint commit: "
+                f"expected {expected_parent_sha}, got {actual_parent_sha}"
+            )
 
     status = _run(
         ["git", "status", "--porcelain"],
@@ -168,11 +247,19 @@ def commit_step(
     workspace: Path,
     step_id: str,
     step_title: str,
+    *,
+    expected_parent_sha: str | None = None,
 ) -> str | None:
-    commit_sha = commit_changes(
-        workspace,
-        f"Checkpoint {step_id}: {step_title}",
-    )
+    message = f"Complete {step_id}: {step_title}"
+
+    if expected_parent_sha is None:
+        commit_sha = commit_changes(workspace, message)
+    else:
+        commit_sha = commit_changes(
+            workspace,
+            message,
+            expected_parent_sha=expected_parent_sha,
+        )
 
     return commit_sha
 
@@ -181,6 +268,7 @@ def finalize_checkpoint_history(
     workspace: Path,
     *,
     baseline_sha: str,
+    expected_checkpoint_sha: str,
     issue_number: int,
     issue_title: str,
 ) -> str:
@@ -191,6 +279,18 @@ def finalize_checkpoint_history(
         ["git", "cat-file", "-e", f"{baseline_sha}^{{commit}}"],
         cwd=workspace,
     )
+
+    actual_checkpoint_sha = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+    ).strip()
+
+    if actual_checkpoint_sha != expected_checkpoint_sha:
+        raise RuntimeError(
+            "Workspace HEAD changed before final history rewrite: "
+            f"expected {expected_checkpoint_sha}, "
+            f"got {actual_checkpoint_sha}"
+        )
 
     # Preserve both committed checkpoint changes and any approved
     # whole-plan repair that is still uncommitted.

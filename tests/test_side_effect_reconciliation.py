@@ -160,6 +160,9 @@ class SideEffectReconciliationTests(unittest.TestCase):
         client = SimpleNamespace(
             find_open_pr_by_branch=lambda branch: pull_request,
             create_draft_pr=Mock(),
+            update_pull_request=lambda pull_request, **kwargs: (
+                pull_request.edit(**kwargs) or pull_request
+            ),
         )
 
         with patch("app.graph.GitHubAppClient", return_value=client):

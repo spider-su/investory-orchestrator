@@ -131,12 +131,21 @@ def publish_plan_node(state: WorkflowState) -> dict:
         print("Plan publication disabled")
         return {"plan_published": False}
 
-    client = GitHubAppClient()
-
-    client.add_issue_comment(
-        state["issue_number"],
-        state["plan_markdown"],
-    )
+    try:
+        client = GitHubAppClient()
+        client.upsert_issue_comment(
+            state["issue_number"],
+            state["plan_markdown"],
+            marker="<!-- investory-orchestrator-plan -->",
+        )
+    except RuntimeError as error:
+        message = str(error)
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "publish_plan",
+            "error": message,
+        }
 
     print("Plan published to GitHub issue")
 
@@ -153,6 +162,9 @@ def route_after_planner(state: WorkflowState) -> str:
 def route_after_plan_publication(
     state: WorkflowState,
 ) -> str:
+    if state.get("workflow_status") == "blocked":
+        return "blocked"
+
     if state["requires_user_input"]:
         return "awaiting_user_input"
 
@@ -733,12 +745,21 @@ def publish_review_node(state: WorkflowState) -> dict:
         print("Review publication disabled")
         return {"review_published": False}
 
-    client = GitHubAppClient()
-
-    client.add_issue_comment(
-        state["issue_number"],
-        state["review_markdown"],
-    )
+    try:
+        client = GitHubAppClient()
+        client.upsert_issue_comment(
+            state["issue_number"],
+            state["review_markdown"],
+            marker="<!-- investory-orchestrator-review -->",
+        )
+    except RuntimeError as error:
+        message = str(error)
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "publish_review",
+            "error": message,
+        }
 
     print("Review published to GitHub issue")
 
@@ -762,6 +783,9 @@ def route_after_reviewer(
 def route_after_review_publication(
     state: WorkflowState,
 ) -> str:
+    if state.get("workflow_status") == "blocked":
+        return "blocked"
+
     if state["review_status"] == "approved":
         return "complete_step"
 
@@ -777,6 +801,7 @@ def complete_step_node(state: WorkflowState) -> dict:
         Path(state["workspace"]),
         step["id"],
         step["title"],
+        expected_parent_sha=state.get("step_baseline_sha") or None,
     )
 
     step["status"] = "completed"
@@ -1166,6 +1191,7 @@ def finalize_history_node(state: WorkflowState) -> dict:
         commit_sha = finalize_checkpoint_history(
             Path(state["workspace"]),
             baseline_sha=state["issue_baseline_sha"],
+            expected_checkpoint_sha=state["final_baseline_sha"],
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
         )
@@ -1676,6 +1702,7 @@ def build_graph():
         {
             "start_environment": "start_environment",
             "awaiting_user_input": "awaiting_user_input",
+            "blocked": "blocked",
         },
     )
 
@@ -1746,6 +1773,7 @@ def build_graph():
             "isolate_review_failure": (
                 "isolate_review_failure"
             ),
+            "blocked": "blocked",
         },
     )
 
@@ -1886,6 +1914,16 @@ def build_graph():
     return builder.compile(
         checkpointer=SqliteSaver(connection)
     )
+
+
+def close_graph(graph: object) -> None:
+    """Release the SQLite checkpoint connection owned by a compiled graph."""
+    checkpointer = getattr(graph, "checkpointer", None)
+    connection = getattr(checkpointer, "conn", None)
+    close = getattr(connection, "close", None)
+
+    if callable(close):
+        close()
 
 
 def main() -> None:

@@ -1,128 +1,58 @@
 from __future__ import annotations
 
-import subprocess
+import unittest
 from pathlib import Path
-from typing import Literal, TypedDict
+from unittest.mock import patch
+
+from app.test_runner import (
+    run_validation,
+    start_environment,
+    stop_environment,
+)
 
 
-CommandStatus = Literal[
-    "success",
-    "environment_failure",
-    "project_validation_failure",
-]
+class TestRunnerTests(unittest.TestCase):
+    workspace = Path("/tmp/issue-42")
 
+    @patch("app.test_runner._run", return_value=(0, "ready"))
+    def test_start_environment_reports_success(self, run_mock) -> None:
+        result = start_environment(self.workspace, 42)
 
-class CommandResult(TypedDict):
-    status: CommandStatus
-    success: bool
-    exit_code: int
-    output: str
-
-
-def _run(
-    command: list[str],
-    *,
-    workspace: Path,
-    timeout: int,
-) -> tuple[int, str]:
-    try:
-        result = subprocess.run(
-            command,
-            cwd=workspace,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout,
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["output"], "ready")
+        run_mock.assert_called_once_with(
+            ["bash", "scripts/agent-devcontainer.sh", "up", "42"],
+            workspace=self.workspace,
+            timeout=1800,
         )
-    except subprocess.TimeoutExpired as error:
-        output = error.stdout or ""
 
-        if isinstance(output, bytes):
-            output = output.decode(errors="replace")
+    @patch("app.test_runner._run", return_value=(2, "validation failed"))
+    def test_validation_reports_project_failure(self, run_mock) -> None:
+        result = run_validation(self.workspace, 42)
 
-        return 124, f"{output}\nCommand timed out after {timeout} seconds."
-    except OSError as error:
-        return 127, f"Could not start command: {error}"
+        self.assertEqual(result["status"], "project_validation_failure")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["exit_code"], 2)
+        run_mock.assert_called_once_with(
+            ["bash", "scripts/agent-devcontainer.sh", "validate", "42"],
+            workspace=self.workspace,
+            timeout=1800,
+        )
 
-    return result.returncode, result.stdout or "(command produced no output)"
+    @patch("app.test_runner._run", return_value=(127, "missing command"))
+    def test_stop_environment_reports_environment_failure(self, run_mock) -> None:
+        result = stop_environment(self.workspace, 42)
 
-
-def start_environment(
-    workspace: Path,
-    issue_number: int,
-) -> CommandResult:
-    exit_code, output = _run(
-        [
-            "bash",
-            "scripts/agent-devcontainer.sh",
-            "up",
-            str(issue_number),
-        ],
-        workspace=workspace,
-        timeout=1800,
-    )
-
-    return {
-        "status": (
-            "success"
-            if exit_code == 0
-            else "environment_failure"
-        ),
-        "success": exit_code == 0,
-        "exit_code": exit_code,
-        "output": output,
-    }
+        self.assertEqual(result["status"], "environment_failure")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["exit_code"], 127)
+        run_mock.assert_called_once_with(
+            ["bash", "scripts/agent-devcontainer.sh", "down", "42"],
+            workspace=self.workspace,
+            timeout=300,
+        )
 
 
-def run_validation(
-    workspace: Path,
-    issue_number: int,
-) -> CommandResult:
-    exit_code, output = _run(
-        [
-            "bash",
-            "scripts/agent-devcontainer.sh",
-            "validate",
-            str(issue_number),
-        ],
-        workspace=workspace,
-        timeout=1800,
-    )
-
-    return {
-        "status": (
-            "success"
-            if exit_code == 0
-            else "project_validation_failure"
-        ),
-        "success": exit_code == 0,
-        "exit_code": exit_code,
-        "output": output,
-    }
-
-
-def stop_environment(
-    workspace: Path,
-    issue_number: int,
-) -> CommandResult:
-    exit_code, output = _run(
-        [
-            "bash",
-            "scripts/agent-devcontainer.sh",
-            "down",
-            str(issue_number),
-        ],
-        workspace=workspace,
-        timeout=300,
-    )
-
-    return {
-        "status": (
-            "success"
-            if exit_code == 0
-            else "environment_failure"
-        ),
-        "success": exit_code == 0,
-        "exit_code": exit_code,
-        "output": output,
-    }
+if __name__ == "__main__":
+    unittest.main()

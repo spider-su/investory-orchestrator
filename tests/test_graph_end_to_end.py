@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from app.agents.planner import ImplementationPlan, PlanStep
 from app.agents.reviewer import ReviewResult
-from app.graph import build_graph
+from app.graph import build_graph, close_graph
 
 
 class FakePullRequest:
@@ -31,7 +31,13 @@ class FakeGitHubClient:
             body="Implement one small, fully specified change.",
         )
 
-    def add_issue_comment(self, issue_number: int, body: str) -> int:
+    def upsert_issue_comment(
+        self,
+        issue_number: int,
+        body: str,
+        *,
+        marker: str,
+    ) -> int:
         self.comments.append(body)
         return len(self.comments)
 
@@ -257,14 +263,17 @@ class GraphEndToEndTests(unittest.TestCase):
                 )
 
                 graph = build_graph()
-                result = graph.invoke(
-                    initial_state(42),
-                    config={
-                        "configurable": {
-                            "thread_id": "test-successful-issue"
-                        }
-                    },
-                )
+                try:
+                    result = graph.invoke(
+                        initial_state(42),
+                        config={
+                            "configurable": {
+                                "thread_id": "test-successful-issue"
+                            }
+                        },
+                    )
+                finally:
+                    close_graph(graph)
 
         self.assertEqual(result["workflow_status"], "completed")
         self.assertEqual(result["completed_steps"], ["step-01"])

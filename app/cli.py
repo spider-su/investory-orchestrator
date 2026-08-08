@@ -13,6 +13,15 @@ ResumeResolver = Callable[[dict], str]
 IssueReloader = Callable[[int], dict]
 
 
+def _close_graph(graph: Any) -> None:
+    checkpointer = getattr(graph, "checkpointer", None)
+    connection = getattr(checkpointer, "conn", None)
+    close = getattr(connection, "close", None)
+
+    if callable(close):
+        close()
+
+
 def build_initial_state(issue_number: int) -> WorkflowState:
     return {
         "issue_number": issue_number,
@@ -109,80 +118,86 @@ def run_cli(
     graph = build_graph()
 
     if not args.resume:
-        graph.invoke(
-            build_initial_state(args.issue),
-            config=config,
-        )
+        try:
+            graph.invoke(
+                build_initial_state(args.issue),
+                config=config,
+            )
+        finally:
+            _close_graph(graph)
         return
 
-    snapshot = graph.get_state(config)
+    try:
+        snapshot = graph.get_state(config)
 
-    if not snapshot.values:
-        raise RuntimeError(
-            f"No checkpoint exists for issue #{args.issue}"
+        if not snapshot.values:
+            raise RuntimeError(
+                f"No checkpoint exists for issue #{args.issue}"
+            )
+
+        saved_state = dict(snapshot.values)
+        blocked_stage = saved_state.get("blocked_stage", "")
+        resume_from = resolve_resume_from(saved_state)
+
+        configured_max_attempts = int(
+            os.getenv(
+                "MAX_ATTEMPTS",
+                str(saved_state["max_attempts"]),
+            )
         )
 
-    saved_state = dict(snapshot.values)
-    blocked_stage = saved_state.get("blocked_stage", "")
-    resume_from = resolve_resume_from(saved_state)
-
-    configured_max_attempts = int(
-        os.getenv(
-            "MAX_ATTEMPTS",
-            str(saved_state["max_attempts"]),
-        )
-    )
-
-    configured_max_final_attempts = int(
-        os.getenv(
-            "MAX_FINAL_ATTEMPTS",
-            str(saved_state.get("max_final_attempts", 3)),
-        )
-    )
-
-    if (
-        blocked_stage == "coder"
-        and saved_state["attempt"] >= configured_max_attempts
-    ):
-        raise RuntimeError(
-            "Retry limit is exhausted. Increase MAX_ATTEMPTS "
-            f"above {saved_state['attempt']} before resuming."
+        configured_max_final_attempts = int(
+            os.getenv(
+                "MAX_FINAL_ATTEMPTS",
+                str(saved_state.get("max_final_attempts", 3)),
+            )
         )
 
-    if (
-        blocked_stage == "final_integration_coder"
-        and saved_state.get("final_attempt", 0)
-        >= configured_max_final_attempts
-    ):
-        raise RuntimeError(
-            "Whole-plan repair limit is exhausted. Increase "
-            "MAX_FINAL_ATTEMPTS above "
-            f"{saved_state.get('final_attempt', 0)} before resuming."
+        if (
+            blocked_stage == "coder"
+            and saved_state["attempt"] >= configured_max_attempts
+        ):
+            raise RuntimeError(
+                "Retry limit is exhausted. Increase MAX_ATTEMPTS "
+                f"above {saved_state['attempt']} before resuming."
+            )
+
+        if (
+            blocked_stage == "final_integration_coder"
+            and saved_state.get("final_attempt", 0)
+            >= configured_max_final_attempts
+        ):
+            raise RuntimeError(
+                "Whole-plan repair limit is exhausted. Increase "
+                "MAX_FINAL_ATTEMPTS above "
+                f"{saved_state.get('final_attempt', 0)} before resuming."
+            )
+
+        resume_updates = {
+            "workflow_status": "implementing",
+            "max_attempts": configured_max_attempts,
+            "max_final_attempts": configured_max_final_attempts,
+            "blocked_reason": "",
+            "blocked_stage": "",
+            "coder_error": "",
+            "review_error": "",
+            "final_review_error": "",
+            "error": "",
+        }
+
+        if blocked_stage == "awaiting_user_input":
+            resume_updates.update(
+                reload_issue_for_planning(args.issue)
+            )
+
+        graph.update_state(
+            config,
+            resume_updates,
+            as_node=resume_from,
         )
-
-    resume_updates = {
-        "workflow_status": "implementing",
-        "max_attempts": configured_max_attempts,
-        "max_final_attempts": configured_max_final_attempts,
-        "blocked_reason": "",
-        "blocked_stage": "",
-        "coder_error": "",
-        "review_error": "",
-        "final_review_error": "",
-        "error": "",
-    }
-
-    if blocked_stage == "awaiting_user_input":
-        resume_updates.update(
-            reload_issue_for_planning(args.issue)
-        )
-
-    graph.update_state(
-        config,
-        resume_updates,
-        as_node=resume_from,
-    )
-    graph.invoke(None, config=config)
+        graph.invoke(None, config=config)
+    finally:
+        _close_graph(graph)
 
 
 def main(argv: list[str] | None = None) -> None:

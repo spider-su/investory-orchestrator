@@ -56,6 +56,44 @@ def _run_git(
     return result.stdout
 
 
+def _untracked_diff(workspace: Path, *, limit: int = 20_000) -> str:
+    names = _run_git(
+        workspace,
+        ["ls-files", "--others", "--exclude-standard", "--", "."],
+    ).splitlines()
+    sections: list[str] = []
+
+    workspace_root = workspace.resolve()
+
+    for name in names:
+        relative_path = Path(name)
+        path = (workspace / relative_path).resolve()
+
+        if relative_path.is_absolute() or not path.is_relative_to(workspace_root):
+            continue
+
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            rendered = f"<unable to read untracked file: {error}>"
+        else:
+            if b"\x00" in content:
+                rendered = f"<binary file, {len(content)} bytes>"
+            else:
+                rendered = content.decode("utf-8", errors="replace")
+                if len(rendered) > limit:
+                    rendered = rendered[:limit] + "\n... <truncated>"
+
+        sections.extend(
+            [
+                f"## Untracked file: {relative_path.as_posix()}",
+                rendered,
+            ]
+        )
+
+    return "\n\n".join(sections)
+
+
 def _branch_diff(
     workspace: Path,
     *,
@@ -103,6 +141,10 @@ def _branch_diff(
                 uncommitted,
             ]
         )
+
+    untracked = _untracked_diff(workspace)
+    if untracked.strip():
+        sections.append(untracked)
 
     return (
         "\n\n".join(sections)

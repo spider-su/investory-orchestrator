@@ -87,6 +87,7 @@ class WorkspaceFinalizationTest(unittest.TestCase):
             final_sha = finalize_checkpoint_history(
                 workspace,
                 baseline_sha=baseline_sha,
+                expected_checkpoint_sha=second_checkpoint,
                 issue_number=20,
                 issue_title="Test check",
             )
