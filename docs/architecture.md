@@ -222,12 +222,14 @@ checkpoint tip
 `MAX_FINAL_ATTEMPTS` bounds these repair attempts and defaults to
 `MAX_ATTEMPTS`.
 
-After approval, checkpoint history is replaced with one logical commit:
+After approval, checkpoint history is replaced with one logical commit. The
+orchestrator creates the commit object first, then compare-and-set updates the
+local branch ref from the expected checkpoint tip:
 
 ```bash
-git reset --soft <issue-baseline-sha>
-git add --all
-git commit -m "Implement #<issue-number>: <issue-title>"
+git add -- <approved-paths>
+git commit-tree <final-tree> -p <issue-baseline-sha>
+git update-ref <branch-ref> <final-commit> <checkpoint-tip>
 ```
 
 Only the final logical commit is pushed. Checkpoint SHAs remain in workflow

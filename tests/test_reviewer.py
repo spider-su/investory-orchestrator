@@ -11,6 +11,8 @@ from app.agents.reviewer import (
     ReviewResult,
     ReviewerError,
     _branch_diff,
+    review_classification,
+    review_identity,
     review_implementation,
     review_to_markdown,
 )
@@ -89,6 +91,37 @@ class ReviewerTests(unittest.TestCase):
         self.assertIn("staged diff", diff)
         self.assertIn("## Uncommitted diff", diff)
         self.assertIn("uncommitted diff", diff)
+
+    def test_review_identity_marks_same_or_missing_model_as_secondary(self) -> None:
+        self.assertEqual(
+            review_classification("", "gpt-5.4-mini"),
+            "secondary_automated_review",
+        )
+        self.assertEqual(
+            review_classification("gpt-5.4-mini", "gpt-5.4-mini"),
+            "secondary_automated_review",
+        )
+        self.assertEqual(
+            review_classification("codex-model", "review-model"),
+            "independent",
+        )
+
+    def test_review_identity_uses_reviewer_configuration(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "REVIEWER_MODEL": "review-model",
+                "REVIEWER_PROVIDER": "review-provider",
+            },
+        ):
+            self.assertEqual(
+                review_identity(),
+                {
+                    "backend": "langchain-openai",
+                    "provider": "review-provider",
+                    "model": "review-model",
+                },
+            )
 
     def test_branch_diff_returns_default_message_without_changes(self) -> None:
         with patch(

@@ -23,6 +23,48 @@ def _run(workspace: Path, *command: str) -> str:
 
 
 class WorkspaceFinalizationTest(unittest.TestCase):
+    def test_commit_step_rejects_unapproved_and_sensitive_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            _run(workspace, "git", "init")
+            _run(workspace, "git", "config", "user.name", "Test User")
+            _run(
+                workspace,
+                "git",
+                "config",
+                "user.email",
+                "test@example.com",
+            )
+
+            source = workspace / "service.txt"
+            source.write_text("baseline\n", encoding="utf-8")
+            _run(workspace, "git", "add", "service.txt")
+            _run(workspace, "git", "commit", "-m", "Baseline")
+
+            source.write_text("changed\n", encoding="utf-8")
+            unrelated = workspace / "unrelated.txt"
+            unrelated.write_text("must not commit\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "outside"):
+                commit_step(
+                    workspace,
+                    "step-01",
+                    "Scoped change",
+                    allowed_paths=["service.txt"],
+                )
+
+            unrelated.unlink()
+            secret = workspace / ".env"
+            secret.write_text("TOKEN=secret\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "outside"):
+                commit_step(
+                    workspace,
+                    "step-01",
+                    "Scoped change",
+                    allowed_paths=["."],
+                )
+
     def test_checkpoint_commits_are_replaced_by_one_final_commit(
         self,
     ) -> None:
@@ -152,3 +194,54 @@ class WorkspaceFinalizationTest(unittest.TestCase):
                 issue_title="Test check",
             )
             self.assertEqual(final_sha, repeated_sha)
+
+    def test_finalization_includes_clean_checkpoint_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            _run(workspace, "git", "init")
+            _run(workspace, "git", "config", "user.name", "Test User")
+            _run(
+                workspace,
+                "git",
+                "config",
+                "user.email",
+                "test@example.com",
+            )
+
+            source = workspace / "service.txt"
+            source.write_text("baseline\n", encoding="utf-8")
+            _run(workspace, "git", "add", "service.txt")
+            _run(workspace, "git", "commit", "-m", "Baseline")
+            baseline_sha = _run(workspace, "git", "rev-parse", "HEAD")
+
+            source.write_text("baseline\nimplemented\n", encoding="utf-8")
+            checkpoint_sha = commit_step(
+                workspace,
+                "step-01",
+                "Implement change",
+                operation_id="issue-21:checkpoint:step-01:baseline",
+                allowed_paths=["service.txt"],
+            )
+            self.assertIsNotNone(checkpoint_sha)
+
+            final_sha = finalize_checkpoint_history(
+                workspace,
+                baseline_sha=baseline_sha,
+                expected_checkpoint_sha=checkpoint_sha,
+                operation_id=(
+                    f"issue-21:finalize-history:{baseline_sha}:"
+                    f"{checkpoint_sha}"
+                ),
+                issue_number=21,
+                issue_title="Clean checkpoint",
+                allowed_paths=["service.txt"],
+            )
+
+            self.assertEqual(
+                final_sha,
+                _run(workspace, "git", "rev-parse", "HEAD"),
+            )
+            self.assertEqual(
+                "baseline\nimplemented\n",
+                source.read_text(encoding="utf-8"),
+            )

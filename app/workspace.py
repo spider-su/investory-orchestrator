@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 from app.github_client import GitHubAppClient
@@ -153,6 +154,20 @@ def _validate_existing_workspace(
             f"{status}"
         )
 
+    remote_head_sha = client.get_branch_head_sha(branch)
+    if remote_head_sha is not None:
+        local_head_sha = _run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+        ).strip()
+
+        if local_head_sha != remote_head_sha:
+            raise RuntimeError(
+                "Existing workspace HEAD does not match remote branch "
+                f"'{branch}': local {local_head_sha}, "
+                f"remote {remote_head_sha}"
+            )
+
 
 def _find_commit_by_operation_id(
     workspace: Path,
@@ -175,6 +190,88 @@ def _find_commit_by_operation_id(
             return commit_sha, parent_sha
 
     return None
+
+
+def _changed_paths(workspace: Path) -> list[str]:
+    output = _run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
+        cwd=workspace,
+    )
+    paths: list[str] = []
+
+    for line in output.splitlines():
+        if len(line) < 4:
+            continue
+
+        path = line[3:]
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+
+        paths.append(Path(path).as_posix())
+
+    return paths
+
+
+def _path_is_allowed(path: str, allowed_paths: Iterable[str]) -> bool:
+    raw_path = Path(path).as_posix()
+    normalized_path = raw_path.lstrip("./")
+    name = Path(raw_path).name.lower()
+
+    if (
+        name == ".env"
+        or (name.startswith(".env.") and name != ".env.example")
+        or name in {"id_rsa", "id_ed25519"}
+        or name.endswith((".pem", ".key", ".p12", ".pfx"))
+    ):
+        return False
+
+    for allowed in allowed_paths:
+        raw_allowed = Path(str(allowed)).as_posix()
+        if raw_allowed in {".", ""}:
+            return True
+
+        normalized_allowed = raw_allowed.lstrip("./").rstrip("/")
+
+        if (
+            normalized_path == normalized_allowed
+            or normalized_path.startswith(f"{normalized_allowed}/")
+        ):
+            return True
+
+    return False
+
+
+def _stage_changed_paths(
+    workspace: Path,
+    *,
+    allowed_paths: Iterable[str] | None = None,
+) -> list[str]:
+    paths = _changed_paths(workspace)
+
+    if allowed_paths is not None:
+        disallowed = [
+            path
+            for path in paths
+            if not _path_is_allowed(path, allowed_paths)
+        ]
+        if disallowed:
+            raise RuntimeError(
+                "Changes outside the approved path scope: "
+                + ", ".join(disallowed)
+            )
+
+    if paths:
+        _run(
+            ["git", "add", "--", *paths],
+            cwd=workspace,
+        )
+
+    return paths
 
 
 def prepare_workspace(
@@ -247,6 +344,7 @@ def commit_changes(
     *,
     expected_parent_sha: str | None = None,
     operation_id: str | None = None,
+    allowed_paths: Iterable[str] | None = None,
 ) -> str | None:
     _mark_safe_directory(workspace)
 
@@ -290,7 +388,10 @@ def commit_changes(
     if not status:
         return None
 
-    _run(["git", "add", "--all"], cwd=workspace)
+    _stage_changed_paths(
+        workspace,
+        allowed_paths=allowed_paths,
+    )
 
     commit_command = ["git", "commit", "-m", message]
     if operation_id is not None:
@@ -316,6 +417,7 @@ def commit_step(
     *,
     expected_parent_sha: str | None = None,
     operation_id: str | None = None,
+    allowed_paths: Iterable[str] | None = None,
 ) -> str | None:
     message = f"Complete {step_id}: {step_title}"
 
@@ -324,6 +426,8 @@ def commit_step(
         commit_kwargs["expected_parent_sha"] = expected_parent_sha
     if operation_id is not None:
         commit_kwargs["operation_id"] = operation_id
+    if allowed_paths is not None:
+        commit_kwargs["allowed_paths"] = allowed_paths
 
     commit_sha = commit_changes(
         workspace,
@@ -342,6 +446,7 @@ def finalize_checkpoint_history(
     operation_id: str,
     issue_number: int,
     issue_title: str,
+    allowed_paths: Iterable[str] | None = None,
 ) -> str:
     """Replace local checkpoint commits with one final logical commit."""
     _mark_safe_directory(workspace)
@@ -382,49 +487,69 @@ def finalize_checkpoint_history(
                 f"got {actual_checkpoint_sha}"
             )
 
-    if actual_checkpoint_sha == expected_checkpoint_sha:
-        # Preserve both committed checkpoint changes and any approved
-        # whole-plan repair that is still uncommitted.
-        _run(["git", "reset", "--soft", baseline_sha], cwd=workspace)
+    changed_paths = _changed_paths(workspace)
+    if allowed_paths is not None:
+        disallowed = [
+            path
+            for path in changed_paths
+            if not _path_is_allowed(path, allowed_paths)
+        ]
+        if disallowed:
+            raise RuntimeError(
+                "Changes outside the approved path scope: "
+                + ", ".join(disallowed)
+            )
 
-    _run(["git", "add", "--all"], cwd=workspace)
+    # Clear only the index. Keep worktree edits intact, then stage approved
+    # paths and create the final commit object without moving HEAD first.
+    _run(["git", "reset", "--mixed", "HEAD"], cwd=workspace)
+    if changed_paths:
+        _run(["git", "add", "--", *changed_paths], cwd=workspace)
 
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--quiet", "--", "."],
+    tree_sha = _run(["git", "write-tree"], cwd=workspace).strip()
+    baseline_tree_sha = _run(
+        ["git", "rev-parse", f"{baseline_sha}^{{tree}}"],
+        cwd=workspace,
+    ).strip()
+
+    if tree_sha == baseline_tree_sha:
+        raise RuntimeError("No implementation changes remain for final commit.")
+
+    final_sha = _run(
+        [
+            "git",
+            "commit-tree",
+            tree_sha,
+            "-p",
+            baseline_sha,
+            "-m",
+            f"Implement #{issue_number}: {issue_title}",
+            "-m",
+            f"Investory-Operation-Id: {operation_id}",
+        ],
+        cwd=workspace,
+    ).strip()
+
+    head_ref = subprocess.run(
+        ["git", "symbolic-ref", "-q", "HEAD"],
         cwd=workspace,
         text=True,
         capture_output=True,
     )
-
-    if staged.returncode == 0:
-        raise RuntimeError(
-            "No implementation changes remain after checkpoint "
-            "history was reset."
-        )
-
-    if staged.returncode != 1:
-        raise RuntimeError(
-            "Could not inspect staged final implementation.\n"
-            f"stdout:\n{staged.stdout}\n"
-            f"stderr:\n{staged.stderr}"
-        )
+    ref_name = head_ref.stdout.strip() if head_ref.returncode == 0 else "HEAD"
 
     _run(
         [
             "git",
-            "commit",
-            "-m",
-            f"Implement #{issue_number}: {issue_title}",
-            "--trailer",
-            f"Investory-Operation-Id: {operation_id}",
+            "update-ref",
+            ref_name,
+            final_sha,
+            actual_checkpoint_sha,
         ],
         cwd=workspace,
     )
 
-    return _run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=workspace,
-    ).strip()
+    return final_sha
 
 
 def push_branch(

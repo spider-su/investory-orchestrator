@@ -34,6 +34,7 @@ class WorkflowState(TypedDict):
     branch: str
 
     issue_baseline_sha: str
+    remote_baseline_sha: str
     checkpoint_commits: list[str]
 
     attempt: int
@@ -56,6 +57,9 @@ class WorkflowState(TypedDict):
 
     coder_summary: str
     coder_error: str
+    coder_backend: str
+    coder_provider: str
+    coder_model: str
 
     environment_ready: bool
     environment_output: str
@@ -74,6 +78,12 @@ class WorkflowState(TypedDict):
     review_markdown: str
     review_published: bool
     review_error: str
+    reviewer_backend: str
+    reviewer_provider: str
+    reviewer_model: str
+    review_independence: str
+    review_context_fresh: bool
+    review_read_only: bool
 
     commit_sha: Optional[str]
 

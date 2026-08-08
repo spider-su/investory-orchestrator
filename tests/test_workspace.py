@@ -51,7 +51,10 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_existing_workspace_requires_matching_origin_and_clean_tree(self) -> None:
         workspace = Path("D:/projects/investory-orchestrator/workspaces/issue-1")
-        client = SimpleNamespace(repository_name="owner/repository")
+        client = SimpleNamespace(
+            repository_name="owner/repository",
+            get_branch_head_sha=Mock(return_value="remote-sha"),
+        )
 
         with patch(
             "app.workspace._run",
@@ -59,6 +62,7 @@ class WorkspaceTests(unittest.TestCase):
                 "agent/issue-1\n",
                 "https://github.com/owner/repository.git\n",
                 "",
+                "remote-sha\n",
             ],
         ):
             _validate_existing_workspace(
@@ -125,6 +129,29 @@ class WorkspaceTests(unittest.TestCase):
             ],
         ):
             with self.assertRaisesRegex(RuntimeError, "uncommitted"):
+                _validate_existing_workspace(
+                    workspace,
+                    client=client,
+                    branch="agent/issue-1",
+                )
+
+    def test_existing_workspace_rejects_stale_remote_head(self) -> None:
+        workspace = Path("D:/projects/investory-orchestrator/workspaces/issue-1")
+        client = SimpleNamespace(
+            repository_name="owner/repository",
+            get_branch_head_sha=Mock(return_value="remote-sha"),
+        )
+
+        with patch(
+            "app.workspace._run",
+            side_effect=[
+                "agent/issue-1\n",
+                "https://github.com/owner/repository.git\n",
+                "",
+                "local-sha\n",
+            ],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
                 _validate_existing_workspace(
                     workspace,
                     client=client,

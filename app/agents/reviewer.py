@@ -34,6 +34,31 @@ class ReviewerError(RuntimeError):
     pass
 
 
+def review_model() -> str:
+    return os.getenv(
+        "REVIEWER_MODEL",
+        os.getenv("PLANNER_MODEL", "gpt-5.4-mini"),
+    )
+
+
+def review_identity() -> dict[str, str]:
+    return {
+        "backend": "langchain-openai",
+        "provider": os.getenv("REVIEWER_PROVIDER", "openai"),
+        "model": review_model(),
+    }
+
+
+def review_classification(
+    coder_model: str,
+    reviewer_model: str,
+) -> str:
+    if coder_model and reviewer_model and coder_model != reviewer_model:
+        return "independent"
+
+    return "secondary_automated_review"
+
+
 def _run_git(
     workspace: Path,
     command: list[str],
@@ -168,10 +193,7 @@ def review_implementation(
     baseline_sha: str | None = None,
 ) -> ReviewResult:
     model = ChatOpenAI(
-        model=os.getenv(
-            "REVIEWER_MODEL",
-            os.getenv("PLANNER_MODEL", "gpt-5.4-mini"),
-        ),
+        model=review_model(),
         temperature=0,
     )
 

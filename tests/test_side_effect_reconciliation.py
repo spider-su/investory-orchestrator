@@ -18,6 +18,7 @@ def base_state() -> dict:
         "issue_title": "Reconcile remote side effects",
         "workspace": "/tmp/issue-42",
         "branch": "agent/issue-42",
+        "remote_baseline_sha": "old-sha",
         "final_commit_sha": "final-sha",
         "plan": {"summary": "Add reconciliation."},
         "steps": [
@@ -112,6 +113,18 @@ class SideEffectReconciliationTests(unittest.TestCase):
         self.assertEqual(result["workflow_status"], "blocked")
         self.assertEqual(result["blocked_stage"], "push_branch")
         self.assertIn("moved", result["blocked_reason"])
+
+    def test_prepare_push_blocks_when_branch_changed_since_workspace_start(self) -> None:
+        client = SimpleNamespace(
+            get_branch_head_sha=lambda branch: "human-sha"
+        )
+
+        with patch("app.graph.GitHubAppClient", return_value=client):
+            result = prepare_push_branch_node(base_state())
+
+        self.assertEqual(result["workflow_status"], "blocked")
+        self.assertEqual(result["blocked_stage"], "prepare_push_branch")
+        self.assertIn("since workspace preparation", result["blocked_reason"])
 
     def test_push_uses_recorded_lease(self) -> None:
         state = base_state()

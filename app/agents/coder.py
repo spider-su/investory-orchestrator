@@ -9,6 +9,14 @@ class CoderError(RuntimeError):
     pass
 
 
+def coder_identity() -> dict[str, str]:
+    return {
+        "backend": "codex-cli",
+        "provider": os.getenv("CODER_PROVIDER", "unknown"),
+        "model": os.getenv("CODER_MODEL", ""),
+    }
+
+
 def _git_diff(workspace: Path) -> str:
     result = subprocess.run(
         ["git", "diff", "--", "."],

@@ -61,9 +61,10 @@ secondary automated review
 Do not report it as an independent review in logs, issue comments, or pull
 request summaries.
 
-The current implementation does not yet enforce or persist this contract.
-Until enforcement exists, operators must verify model separation manually and
-treat automated review as secondary when the evidence is incomplete.
+The implementation persists coder/reviewer identities, fresh-context and
+read-only evidence, and labels the result `independent` only when both model
+identities are available and differ. Otherwise it labels the result
+`secondary automated review`.
 
 ## Credentials
 
@@ -126,9 +127,8 @@ On resume:
   duplicated.
 
 `--resume` also accepts an interrupted checkpoint whose prepared remote
-operation has not yet returned a normal blocked state. Local checkpoint commits
-and final history rewriting still require manual inspection after an uncertain
-process boundary.
+operation has not yet returned a normal blocked state. Push recovery reuses the
+saved remote precondition; it never refreshes that precondition before retry.
 
 ## Blocked workflows
 

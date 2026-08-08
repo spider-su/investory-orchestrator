@@ -72,7 +72,7 @@ class UserInputResumeTests(unittest.TestCase):
 
         self.assertEqual(
             resolve_resume_from(state),
-            "prepare_push_branch",
+            "push_branch",
         )
 
     def test_nonblocked_state_without_prepared_operation_cannot_resume(self) -> None:

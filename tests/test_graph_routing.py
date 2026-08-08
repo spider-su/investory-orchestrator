@@ -22,6 +22,7 @@ from app.graph import (
     route_after_reviewer,
     route_after_step_completion,
     route_after_validation,
+    resolve_resume_from,
 )
 
 
@@ -299,6 +300,30 @@ class GraphRoutingTests(unittest.TestCase):
         self.assertEqual(
             route_after_create_draft_pr({"workflow_status": "completed"}),
             "cleanup",
+        )
+
+    def test_push_resume_uses_saved_intent_without_repreparing(self) -> None:
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "blocked",
+                    "blocked_stage": "push_branch",
+                }
+            ),
+            "push_branch",
+        )
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "publishing",
+                    "side_effect_intent": {
+                        "status": "prepared",
+                        "kind": "push_branch",
+                        "operation_id": "operation",
+                    },
+                }
+            ),
+            "push_branch",
         )
 
 

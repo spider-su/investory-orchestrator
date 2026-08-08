@@ -7,7 +7,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from app.agents.coder import CoderError, run_coder
+from app.agents.coder import CoderError, coder_identity, run_coder
 from app.agents.planner import (
     PlannerError,
     create_plan,
@@ -15,6 +15,8 @@ from app.agents.planner import (
 )
 from app.agents.reviewer import (
     ReviewerError,
+    review_classification,
+    review_identity,
     review_implementation,
     review_to_markdown,
 )
@@ -287,7 +289,7 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "prepare_finalize_history": "prepare_finalize_history",
         "finalize_history": "finalize_history",
         "prepare_push_branch": "workflow_complete",
-        "push_branch": "prepare_push_branch",
+        "push_branch": "push_branch",
         "prepare_draft_pr": "push_branch",
         "create_draft_pr": "prepare_draft_pr",
         "cleanup": "cleanup",
@@ -315,7 +317,7 @@ def resolve_resume_from(state: dict) -> str:
             "issue_comment": intent.get("resume_node"),
             "checkpoint": "complete_step",
             "finalization": "finalize_history",
-            "push_branch": "prepare_push_branch",
+            "push_branch": "push_branch",
             "draft_pr_upsert": "prepare_draft_pr",
         }.get(intent.get("kind"))
 
@@ -367,11 +369,33 @@ def prepare_workspace_node(state: WorkflowState) -> dict:
         state.get("issue_baseline_sha")
         or current_head(workspace)
     )
+    remote_baseline_sha = client.get_branch_head_sha(branch) or ""
+    local_head_sha = current_head(workspace)
+
+    if remote_baseline_sha and local_head_sha != remote_baseline_sha:
+        raise RuntimeError(
+            "Workspace HEAD does not match the remote issue branch after "
+            "preparation: "
+            f"local {local_head_sha}, remote {remote_baseline_sha}"
+        )
+
+    saved_remote_baseline_sha = state.get("remote_baseline_sha", "")
+
+    if (
+        saved_remote_baseline_sha
+        and saved_remote_baseline_sha != remote_baseline_sha
+    ):
+        raise RuntimeError(
+            "Remote issue branch changed while workspace was paused: "
+            f"expected {saved_remote_baseline_sha}, "
+            f"got {remote_baseline_sha or '<absent>'}"
+        )
 
     return {
         "workspace": str(workspace),
         "branch": branch,
         "issue_baseline_sha": issue_baseline_sha,
+        "remote_baseline_sha": remote_baseline_sha,
     }
 
 
@@ -490,6 +514,7 @@ def prepare_current_step_node(state: WorkflowState) -> dict:
 def coder_node(state: WorkflowState) -> dict:
     next_attempt = state["attempt"] + 1
     step = state["steps"][state["current_step"]]
+    coder_info = coder_identity()
 
     print(
         f"Running coder attempt "
@@ -550,6 +575,9 @@ def coder_node(state: WorkflowState) -> dict:
         return {
             "coder_summary": "",
             "coder_error": message,
+            "coder_backend": coder_info["backend"],
+            "coder_provider": coder_info["provider"],
+            "coder_model": coder_info["model"],
             "attempt_artifacts": artifacts,
             "last_failed_patch_path": last_failed_patch_path,
             "blocked_reason": message,
@@ -566,6 +594,9 @@ def coder_node(state: WorkflowState) -> dict:
         "review_status": "not_started",
         "coder_summary": summary,
         "coder_error": "",
+        "coder_backend": coder_info["backend"],
+        "coder_provider": coder_info["provider"],
+        "coder_model": coder_info["model"],
         "blocked_stage": "",
         "error": "",
     }
@@ -814,6 +845,11 @@ def validation_success_node(state: WorkflowState) -> dict:
 def reviewer_node(state: WorkflowState) -> dict:
     print("Reviewing implementation")
     step = state["steps"][state["current_step"]]
+    reviewer_info = review_identity()
+    classification = review_classification(
+        state.get("coder_model", ""),
+        reviewer_info["model"],
+    )
 
     try:
         review = review_implementation(
@@ -842,12 +878,23 @@ def reviewer_node(state: WorkflowState) -> dict:
             "review_markdown": "",
             "review_published": False,
             "review_error": message,
+            "reviewer_backend": reviewer_info["backend"],
+            "reviewer_provider": reviewer_info["provider"],
+            "reviewer_model": reviewer_info["model"],
+            "review_independence": classification,
+            "review_context_fresh": True,
+            "review_read_only": True,
             "blocked_reason": message,
             "blocked_stage": "reviewer",
             "error": message,
         }
 
     markdown = review_to_markdown(review)
+    if classification != "independent":
+        markdown = (
+            "**Review classification:** secondary automated review\n\n"
+            + markdown
+        )
 
     print(f"Review result: {review.status}")
 
@@ -856,6 +903,12 @@ def reviewer_node(state: WorkflowState) -> dict:
         "review_status": review.status,
         "review": review.model_dump(mode="json"),
         "review_markdown": markdown,
+        "reviewer_backend": reviewer_info["backend"],
+        "reviewer_provider": reviewer_info["provider"],
+        "reviewer_model": reviewer_info["model"],
+        "review_independence": classification,
+        "review_context_fresh": True,
+        "review_read_only": True,
         "review_published": False,
         "review_error": "",
         "error": "",
@@ -1036,6 +1089,7 @@ def complete_step_node(state: WorkflowState) -> dict:
                 or None
             ),
             operation_id=intent.get("operation_id"),
+            allowed_paths=step.get("affected_areas", []),
         )
     except RuntimeError as error:
         message = str(error)
@@ -1294,6 +1348,11 @@ def route_after_final_integration_coder(
 
 def final_reviewer_node(state: WorkflowState) -> dict:
     print("Running final whole-plan review")
+    reviewer_info = review_identity()
+    classification = review_classification(
+        state.get("coder_model", ""),
+        reviewer_info["model"],
+    )
 
     try:
         review = review_implementation(
@@ -1312,6 +1371,12 @@ def final_reviewer_node(state: WorkflowState) -> dict:
             "final_review_status": "review_failure",
             "final_review": {},
             "final_review_error": message,
+            "reviewer_backend": reviewer_info["backend"],
+            "reviewer_provider": reviewer_info["provider"],
+            "reviewer_model": reviewer_info["model"],
+            "review_independence": classification,
+            "review_context_fresh": True,
+            "review_read_only": True,
             "blocked_reason": message,
             "blocked_stage": "final_reviewer",
             "error": message,
@@ -1323,6 +1388,12 @@ def final_reviewer_node(state: WorkflowState) -> dict:
         "final_review_status": review.status,
         "final_review": review.model_dump(mode="json"),
         "final_review_error": "",
+        "reviewer_backend": reviewer_info["backend"],
+        "reviewer_provider": reviewer_info["provider"],
+        "reviewer_model": reviewer_info["model"],
+        "review_independence": classification,
+        "review_context_fresh": True,
+        "review_read_only": True,
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -1461,6 +1532,15 @@ def prepare_finalize_history_node(state: WorkflowState) -> dict:
     }
 
 
+def _approved_paths_for_steps(steps: list[dict]) -> list[str]:
+    paths: list[str] = []
+    for step in steps:
+        for path in step.get("affected_areas", []):
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
 def route_after_prepare_finalize_history(state: WorkflowState) -> str:
     if state.get("workflow_status") == "blocked":
         return "blocked"
@@ -1492,6 +1572,7 @@ def finalize_history_node(state: WorkflowState) -> dict:
             operation_id=intent["operation_id"],
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
+            allowed_paths=_approved_paths_for_steps(state["steps"]),
         )
     except RuntimeError as error:
         message = str(error)
@@ -1544,7 +1625,22 @@ def prepare_push_branch_node(state: WorkflowState) -> dict:
 
     try:
         client = GitHubAppClient()
+        if "remote_baseline_sha" not in state:
+            raise RuntimeError(
+                "Remote workspace baseline is missing; manual reconciliation "
+                "is required before push."
+            )
+
         expected_remote_sha = client.get_branch_head_sha(state["branch"])
+        baseline_remote_sha = state["remote_baseline_sha"] or None
+
+        if expected_remote_sha != baseline_remote_sha:
+            expected_display = baseline_remote_sha or "<absent>"
+            actual_display = expected_remote_sha or "<absent>"
+            raise RuntimeError(
+                "Remote issue branch changed since workspace preparation: "
+                f"expected {expected_display}, got {actual_display}"
+            )
     except RuntimeError as error:
         message = str(error)
         return {
@@ -1755,7 +1851,8 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
             f"{completed_steps}\n\n"
             "## Validation\n\n"
             "- Local validation passed for every step\n"
-            "- Automated reviewer approved every step\n"
+            f"- {('Independent' if state.get('review_independence') == 'independent' else 'Secondary')} "
+            "automated reviewer approved every step\n"
             "- Final whole-plan validation passed\n"
             "- Final whole-plan review approved the integrated change\n\n"
             f"Final commit: `{state['final_commit_sha']}`\n\n"

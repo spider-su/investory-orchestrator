@@ -4,6 +4,8 @@ import os
 import signal
 import subprocess
 from pathlib import Path
+from threading import Thread
+from typing import BinaryIO
 from typing import Literal, TypedDict
 
 
@@ -74,6 +76,58 @@ def _terminate_process_group(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
+class _BoundedOutput:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.marker = b"\n... <output truncated> ...\n"
+        available = max(limit - len(self.marker), 0)
+        self.head_limit = available // 2
+        self.tail_limit = available - self.head_limit
+        self.buffer = bytearray()
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.truncated = False
+
+    def feed(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+
+        if not self.truncated:
+            combined = self.buffer + chunk
+            if len(combined) <= self.limit:
+                self.buffer = combined
+                return
+
+            self.head = combined[:self.head_limit]
+            self.tail = combined[-self.tail_limit:] if self.tail_limit else bytearray()
+            self.truncated = True
+            return
+
+        if self.tail_limit:
+            self.tail.extend(chunk)
+            if len(self.tail) > self.tail_limit:
+                del self.tail[:-self.tail_limit]
+
+    def text(self) -> str:
+        if not self.truncated:
+            output = bytes(self.buffer)
+        else:
+            output = bytes(self.head) + self.marker + bytes(self.tail)
+
+        return output.decode("utf-8", errors="replace")
+
+
+def _read_output(stream: BinaryIO, output: _BoundedOutput) -> None:
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                return
+            output.feed(chunk)
+    finally:
+        stream.close()
+
+
 def _run(
     command: list[str],
     *,
@@ -90,7 +144,7 @@ def _run(
         process = subprocess.Popen(
             command,
             cwd=workspace,
-            text=True,
+            text=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             **process_options,
@@ -98,17 +152,31 @@ def _run(
     except OSError as error:
         return 127, f"Could not start command: {error}"
 
+    if process.stdout is None:
+        process.terminate()
+        process.wait()
+        return 127, "Could not capture command output"
+
+    output = _BoundedOutput(MAX_OUTPUT_LENGTH)
+    reader = Thread(
+        target=_read_output,
+        args=(process.stdout, output),
+        daemon=True,
+    )
+    reader.start()
+
     try:
-        output, _ = process.communicate(timeout=timeout)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_process_group(process)
-        output, _ = process.communicate()
-        output_text = _limit_output(_text_output(output))
+        reader.join(timeout=5)
+        output_text = output.text()
         return 124, (
             f"{output_text}\nCommand timed out after {timeout} seconds."
         )
 
-    output_text = _limit_output(_text_output(output))
+    reader.join()
+    output_text = output.text()
     return process.returncode, output_text or "(command produced no output)"
 
 
