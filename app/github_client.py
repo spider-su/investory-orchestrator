@@ -243,8 +243,16 @@ class GitHubAppClient:
                 head=f"{owner}:{branch}",
             )
 
-            for pull_request in pull_requests:
-                return pull_request
+            matches = list(pull_requests)
+
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"Multiple open pull requests found for branch "
+                    f"'{branch}'"
+                )
+
+            if matches:
+                return matches[0]
         except GithubException as error:
             raise RuntimeError(
                 f"Failed to search for an open pull request "

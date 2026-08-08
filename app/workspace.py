@@ -154,6 +154,29 @@ def _validate_existing_workspace(
         )
 
 
+def _find_commit_by_operation_id(
+    workspace: Path,
+    operation_id: str,
+) -> tuple[str, str] | None:
+    output = _run(
+        [
+            "git",
+            "log",
+            "--all",
+            "--format=%H%x00%P%x00%B%x00",
+        ],
+        cwd=workspace,
+    )
+    fields = output.split("\x00")
+
+    for index in range(0, len(fields) - 2, 3):
+        commit_sha, parent_sha, body = fields[index:index + 3]
+        if f"Investory-Operation-Id: {operation_id}" in body:
+            return commit_sha, parent_sha
+
+    return None
+
+
 def prepare_workspace(
     client: GitHubAppClient,
     issue_number: int,
@@ -161,7 +184,7 @@ def prepare_workspace(
     root = Path(
         os.getenv(
             "WORKSPACES_DIR",
-            "/home/alex/investory-orchestrator/workspaces",
+            "/app/workspaces",
         )
     )
 
@@ -183,23 +206,35 @@ def prepare_workspace(
     workspace.parent.mkdir(parents=True, exist_ok=True)
 
     environment = _git_environment(client.token)
+    remote_branch_sha = client.get_branch_head_sha(branch)
 
-    _run(
+    clone_command = [
+        "git",
+        "clone",
+    ]
+
+    if remote_branch_sha:
+        clone_command.extend(["--branch", branch])
+
+    clone_command.extend(
         [
-            "git",
-            "clone",
             f"https://github.com/{client.repository_name}.git",
             str(workspace),
-        ],
+        ]
+    )
+
+    _run(
+        clone_command,
         env=environment,
     )
 
     _mark_safe_directory(workspace)
 
-    _run(
-        ["git", "checkout", "-b", branch],
-        cwd=workspace,
-    )
+    if not remote_branch_sha:
+        _run(
+            ["git", "checkout", "-b", branch],
+            cwd=workspace,
+        )
 
     _configure_git_identity(workspace)
 
@@ -211,8 +246,29 @@ def commit_changes(
     message: str,
     *,
     expected_parent_sha: str | None = None,
+    operation_id: str | None = None,
 ) -> str | None:
     _mark_safe_directory(workspace)
+
+    if operation_id is not None:
+        existing_commit = _find_commit_by_operation_id(
+            workspace,
+            operation_id,
+        )
+
+        if existing_commit is not None:
+            actual_head_sha = _run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=workspace,
+            ).strip()
+
+            if actual_head_sha == existing_commit[0]:
+                return actual_head_sha
+
+            raise RuntimeError(
+                "Checkpoint operation already exists away from HEAD: "
+                f"{existing_commit[0]}"
+            )
 
     if expected_parent_sha is not None:
         actual_parent_sha = _run(
@@ -235,7 +291,17 @@ def commit_changes(
         return None
 
     _run(["git", "add", "--all"], cwd=workspace)
-    _run(["git", "commit", "-m", message], cwd=workspace)
+
+    commit_command = ["git", "commit", "-m", message]
+    if operation_id is not None:
+        commit_command.extend(
+            [
+                "--trailer",
+                f"Investory-Operation-Id: {operation_id}",
+            ]
+        )
+
+    _run(commit_command, cwd=workspace)
 
     return _run(
         ["git", "rev-parse", "HEAD"],
@@ -249,17 +315,21 @@ def commit_step(
     step_title: str,
     *,
     expected_parent_sha: str | None = None,
+    operation_id: str | None = None,
 ) -> str | None:
     message = f"Complete {step_id}: {step_title}"
 
-    if expected_parent_sha is None:
-        commit_sha = commit_changes(workspace, message)
-    else:
-        commit_sha = commit_changes(
-            workspace,
-            message,
-            expected_parent_sha=expected_parent_sha,
-        )
+    commit_kwargs: dict[str, str] = {}
+    if expected_parent_sha is not None:
+        commit_kwargs["expected_parent_sha"] = expected_parent_sha
+    if operation_id is not None:
+        commit_kwargs["operation_id"] = operation_id
+
+    commit_sha = commit_changes(
+        workspace,
+        message,
+        **commit_kwargs,
+    )
 
     return commit_sha
 
@@ -269,6 +339,7 @@ def finalize_checkpoint_history(
     *,
     baseline_sha: str,
     expected_checkpoint_sha: str,
+    operation_id: str,
     issue_number: int,
     issue_title: str,
 ) -> str:
@@ -280,21 +351,42 @@ def finalize_checkpoint_history(
         cwd=workspace,
     )
 
+    existing_commit = _find_commit_by_operation_id(
+        workspace,
+        operation_id,
+    )
+    if existing_commit is not None:
+        actual_head_sha = _run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+        ).strip()
+
+        if actual_head_sha == existing_commit[0]:
+            return actual_head_sha
+
+        raise RuntimeError(
+            "Finalization operation already exists away from HEAD: "
+            f"{existing_commit[0]}"
+        )
+
     actual_checkpoint_sha = _run(
         ["git", "rev-parse", "HEAD"],
         cwd=workspace,
     ).strip()
 
     if actual_checkpoint_sha != expected_checkpoint_sha:
-        raise RuntimeError(
-            "Workspace HEAD changed before final history rewrite: "
-            f"expected {expected_checkpoint_sha}, "
-            f"got {actual_checkpoint_sha}"
-        )
+        if actual_checkpoint_sha != baseline_sha:
+            raise RuntimeError(
+                "Workspace HEAD changed before final history rewrite: "
+                f"expected {expected_checkpoint_sha} or {baseline_sha}, "
+                f"got {actual_checkpoint_sha}"
+            )
 
-    # Preserve both committed checkpoint changes and any approved
-    # whole-plan repair that is still uncommitted.
-    _run(["git", "reset", "--soft", baseline_sha], cwd=workspace)
+    if actual_checkpoint_sha == expected_checkpoint_sha:
+        # Preserve both committed checkpoint changes and any approved
+        # whole-plan repair that is still uncommitted.
+        _run(["git", "reset", "--soft", baseline_sha], cwd=workspace)
+
     _run(["git", "add", "--all"], cwd=workspace)
 
     staged = subprocess.run(
@@ -323,6 +415,8 @@ def finalize_checkpoint_history(
             "commit",
             "-m",
             f"Implement #{issue_number}: {issue_title}",
+            "--trailer",
+            f"Investory-Operation-Id: {operation_id}",
         ],
         cwd=workspace,
     )
@@ -338,9 +432,22 @@ def push_branch(
     workspace: Path,
     branch: str,
     *,
+    expected_local_sha: str | None = None,
     expected_remote_sha: str | None = None,
 ) -> None:
     _mark_safe_directory(workspace)
+
+    if expected_local_sha is not None:
+        actual_local_sha = _run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+        ).strip()
+
+        if actual_local_sha != expected_local_sha:
+            raise RuntimeError(
+                "Workspace HEAD does not match intended push commit: "
+                f"expected {expected_local_sha}, got {actual_local_sha}"
+            )
 
     environment = _git_environment(client.token)
     protected_ref = f"refs/heads/{branch}"

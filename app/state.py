@@ -59,6 +59,10 @@ class WorkflowState(TypedDict):
 
     environment_ready: bool
     environment_output: str
+    cleanup_status: str
+    cleanup_output: str
+    cleanup_resume_stage: str
+    cleanup_resume_reason: str
 
     validation_status: ValidationStatus
     validation_exit_code: int

@@ -69,6 +69,21 @@ class GitHubCommentTests(unittest.TestCase):
                 marker="<!-- marker -->",
             )
 
+    def test_find_open_pr_rejects_duplicate_pull_requests(self) -> None:
+        repository = SimpleNamespace(
+            owner=SimpleNamespace(login="owner"),
+            get_pulls=Mock(
+                return_value=[
+                    SimpleNamespace(number=1),
+                    SimpleNamespace(number=2),
+                ]
+            ),
+        )
+        self.client.get_repository = Mock(return_value=repository)
+
+        with self.assertRaisesRegex(RuntimeError, "Multiple open"):
+            self.client.find_open_pr_by_branch("agent/issue-42")
+
 
 if __name__ == "__main__":
     unittest.main()

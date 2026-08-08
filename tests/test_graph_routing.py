@@ -33,7 +33,7 @@ class GraphRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             route_after_planner({"planning_error": ""}),
-            "publish_plan",
+        "prepare_plan_comment",
         )
 
     def test_route_after_plan_publication(self) -> None:
@@ -107,13 +107,13 @@ class GraphRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             route_after_reviewer({"review_status": "approved"}),
-            "publish_review",
+        "prepare_review_comment",
         )
 
     def test_route_after_review_publication(self) -> None:
         self.assertEqual(
             route_after_review_publication({"review_status": "approved"}),
-            "complete_step",
+        "prepare_checkpoint",
         )
         self.assertEqual(
             route_after_review_publication(
@@ -202,7 +202,7 @@ class GraphRoutingTests(unittest.TestCase):
             route_after_final_reviewer(
                 {"final_review_status": "approved", "final_attempt": 0}
             ),
-            "finalize_history",
+        "prepare_finalize_history",
         )
         self.assertEqual(
             route_after_final_reviewer(

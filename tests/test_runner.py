@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 from app.test_runner import (
+    MAX_OUTPUT_LENGTH,
+    _run,
     run_validation,
     start_environment,
     stop_environment,
@@ -52,6 +55,26 @@ class TestRunnerTests(unittest.TestCase):
             workspace=self.workspace,
             timeout=300,
         )
+
+    def test_run_limits_command_output(self) -> None:
+        _, output = _run(
+            [sys.executable, "-c", "print('x' * 200000)"],
+            workspace=Path.cwd(),
+            timeout=10,
+        )
+
+        self.assertLessEqual(len(output), MAX_OUTPUT_LENGTH)
+        self.assertIn("output truncated", output)
+
+    def test_run_terminates_timed_out_command(self) -> None:
+        exit_code, output = _run(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            workspace=Path.cwd(),
+            timeout=0.1,
+        )
+
+        self.assertEqual(exit_code, 124)
+        self.assertIn("Command timed out", output)
 
 
 if __name__ == "__main__":

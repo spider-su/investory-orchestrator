@@ -8,6 +8,7 @@ from github.GithubException import GithubException
 from app.github_client import GitHubAppClient
 
 from app.graph import (
+    cleanup_node,
     complete_step_node,
     create_draft_pr_node,
     push_branch_node,
@@ -100,6 +101,28 @@ class FakeGitHubClient:
 
 
 class GraphCompletionTests(unittest.TestCase):
+    def test_cleanup_failure_is_persisted_as_blocked_state(self) -> None:
+        with patch(
+            "app.graph.stop_environment",
+            return_value={
+                "success": False,
+                "output": "container still running",
+            },
+        ):
+            result = cleanup_node(
+                {
+                    "workspace": "/tmp/issue-42",
+                    "issue_number": 42,
+                    "blocked_reason": "Original failure",
+                }
+            )
+
+        self.assertEqual(result["workflow_status"], "blocked")
+        self.assertEqual(result["blocked_stage"], "cleanup")
+        self.assertEqual(result["cleanup_status"], "failure")
+        self.assertIn("Original failure", result["blocked_reason"])
+        self.assertIn("container still running", result["blocked_reason"])
+
     def test_complete_step_node_allows_noop_commit(self) -> None:
         state = {
             "workspace": "D:/projects/investory-orchestrator/workspaces/issue-42",

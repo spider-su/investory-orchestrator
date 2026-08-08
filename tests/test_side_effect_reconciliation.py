@@ -138,6 +138,7 @@ class SideEffectReconciliationTests(unittest.TestCase):
             client,
             ANY,
             "agent/issue-42",
+            expected_local_sha="final-sha",
             expected_remote_sha="old-sha",
         )
         self.assertEqual(result["side_effect_intent"], {})

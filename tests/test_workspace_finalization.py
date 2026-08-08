@@ -63,8 +63,17 @@ class WorkspaceFinalizationTest(unittest.TestCase):
                 workspace,
                 "step-01",
                 "Introduce abstraction",
+                operation_id="issue-20:checkpoint:step-01:baseline",
             )
             self.assertIsNotNone(first_checkpoint)
+
+            repeated_checkpoint = commit_step(
+                workspace,
+                "step-01",
+                "Introduce abstraction",
+                operation_id="issue-20:checkpoint:step-01:baseline",
+            )
+            self.assertEqual(first_checkpoint, repeated_checkpoint)
 
             source.write_text(
                 "baseline\nstep one revised\nstep two\n",
@@ -88,6 +97,10 @@ class WorkspaceFinalizationTest(unittest.TestCase):
                 workspace,
                 baseline_sha=baseline_sha,
                 expected_checkpoint_sha=second_checkpoint,
+                operation_id=(
+                    f"issue-20:finalize-history:{baseline_sha}:"
+                    f"{second_checkpoint}"
+                ),
                 issue_number=20,
                 issue_title="Test check",
             )
@@ -126,3 +139,16 @@ class WorkspaceFinalizationTest(unittest.TestCase):
                 "",
                 _run(workspace, "git", "status", "--porcelain"),
             )
+
+            repeated_sha = finalize_checkpoint_history(
+                workspace,
+                baseline_sha=baseline_sha,
+                expected_checkpoint_sha=second_checkpoint,
+                operation_id=(
+                    f"issue-20:finalize-history:{baseline_sha}:"
+                    f"{second_checkpoint}"
+                ),
+                issue_number=20,
+                issue_title="Test check",
+            )
+            self.assertEqual(final_sha, repeated_sha)

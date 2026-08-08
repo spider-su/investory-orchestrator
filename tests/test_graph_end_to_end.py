@@ -295,7 +295,7 @@ class GraphEndToEndTests(unittest.TestCase):
         checkpoint_mock.assert_called_once()
         finalization_mock.assert_called_once()
         push_mock.assert_called_once()
-        self.assertEqual(len(result["side_effect_history"]), 2)
+        self.assertEqual(len(result["side_effect_history"]), 6)
         self.assertEqual(result["side_effect_intent"], {})
         self.assertEqual(len(fake_client.comments), 2)
         self.assertEqual(len(fake_client.created_pull_requests), 1)

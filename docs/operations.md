@@ -26,7 +26,7 @@ GITHUB_APP_PRIVATE_KEY=...
 GITHUB_INSTALLATION_ID=...
 GITHUB_REPOSITORY=spider-su/investory
 
-WORKSPACES_DIR=/home/alex/investory-orchestrator/workspaces
+WORKSPACES_DIR=/app/workspaces
 MAX_ATTEMPTS=3
 MAX_FINAL_ATTEMPTS=3
 PUBLISH_PLAN_COMMENT=true

@@ -30,6 +30,9 @@ from app.side_effects import (
     complete_intent,
     has_prepared_intent,
     prepare_draft_pr_intent,
+    prepare_checkpoint_intent,
+    prepare_finalization_intent,
+    prepare_issue_comment_intent,
     prepare_push_intent,
 )
 from app.state import WorkflowState
@@ -121,6 +124,43 @@ def planner_node(state: WorkflowState) -> dict:
     }
 
 
+def prepare_plan_comment_node(state: WorkflowState) -> dict:
+    if (
+        os.getenv("PUBLISH_PLAN_COMMENT", "true").lower()
+        not in {"1", "true", "yes"}
+    ):
+        return {
+            "side_effect_intent": {},
+            "plan_published": False,
+        }
+
+    intent = prepare_issue_comment_intent(
+        issue_number=state["issue_number"],
+        comment_kind="plan",
+        marker="<!-- investory-orchestrator-plan -->",
+        body=state["plan_markdown"],
+        resume_node="publish_plan",
+    )
+    existing = state.get("side_effect_intent", {})
+
+    if existing and existing != intent:
+        message = "Another side-effect operation is already prepared."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_plan_comment",
+            "error": message,
+        }
+
+    return {
+        "workflow_status": "planning",
+        "side_effect_intent": intent,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
 def publish_plan_node(state: WorkflowState) -> dict:
     publish_enabled = (
         os.getenv("PUBLISH_PLAN_COMMENT", "true").lower()
@@ -130,6 +170,20 @@ def publish_plan_node(state: WorkflowState) -> dict:
     if not publish_enabled:
         print("Plan publication disabled")
         return {"plan_published": False}
+
+    intent = state.get("side_effect_intent", {})
+    if (
+        intent.get("status") != "prepared"
+        or intent.get("kind") != "issue_comment"
+        or intent.get("comment_kind") != "plan"
+    ):
+        message = "Plan comment is missing a prepared side-effect intent."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "publish_plan",
+            "error": message,
+        }
 
     try:
         client = GitHubAppClient()
@@ -149,14 +203,21 @@ def publish_plan_node(state: WorkflowState) -> dict:
 
     print("Plan published to GitHub issue")
 
-    return {"plan_published": True}
+    return {
+        "plan_published": True,
+        "side_effect_intent": {},
+        "side_effect_history": complete_intent(
+            intent,
+            list(state.get("side_effect_history", [])),
+        ),
+    }
 
 
 def route_after_planner(state: WorkflowState) -> str:
     if state["planning_error"]:
         return "planning_failure"
 
-    return "publish_plan"
+    return "prepare_plan_comment"
 
 
 def route_after_plan_publication(
@@ -212,16 +273,24 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
     return {
         "awaiting_user_input": "prepare_workspace",
         "environment": "prepare_workspace",
+        "prepare_plan_comment": "prepare_plan_comment",
+        "publish_plan": "publish_plan",
         "coder": "prepare_current_step",
         "reviewer": "run_validation",
+        "prepare_review_comment": "prepare_review_comment",
+        "publish_review": "publish_review",
+        "prepare_checkpoint": "prepare_checkpoint",
+        "complete_step": "complete_step",
         "prepare_final_review": "complete_step",
         "final_integration_coder": "prepare_final_review",
         "final_reviewer": "final_validation",
-        "finalize_history": "final_reviewer",
+        "prepare_finalize_history": "prepare_finalize_history",
+        "finalize_history": "finalize_history",
         "prepare_push_branch": "workflow_complete",
         "push_branch": "prepare_push_branch",
         "prepare_draft_pr": "push_branch",
         "create_draft_pr": "prepare_draft_pr",
+        "cleanup": "cleanup",
     }.get(blocked_stage)
 
 
@@ -243,6 +312,9 @@ def resolve_resume_from(state: dict) -> str:
     if has_prepared_intent(state):
         intent = state["side_effect_intent"]
         resume_from = {
+            "issue_comment": intent.get("resume_node"),
+            "checkpoint": "complete_step",
+            "finalization": "finalize_history",
             "push_branch": "prepare_push_branch",
             "draft_pr_upsert": "prepare_draft_pr",
         }.get(intent.get("kind"))
@@ -330,6 +402,10 @@ def start_environment_node(state: WorkflowState) -> dict:
         return {
             "environment_ready": True,
             "environment_output": result["output"],
+            "cleanup_status": "not_started",
+            "cleanup_output": "",
+            "cleanup_resume_stage": "",
+            "cleanup_resume_reason": "",
             "validation_status": "not_started",
             "validation_exit_code": 0,
             "error": "",
@@ -340,6 +416,10 @@ def start_environment_node(state: WorkflowState) -> dict:
     return {
         "environment_ready": False,
         "environment_output": result["output"],
+        "cleanup_status": "not_started",
+        "cleanup_output": "",
+        "cleanup_resume_stage": "",
+        "cleanup_resume_reason": "",
         "validation_status": "environment_failure",
         "validation_exit_code": result["exit_code"],
         "error": result["output"],
@@ -647,16 +727,66 @@ def route_after_failed_attempt(state: WorkflowState) -> str:
 def cleanup_node(state: WorkflowState) -> dict:
     print("Stopping Dev Container environment")
 
-    result = stop_environment(
-        Path(state["workspace"]),
-        state["issue_number"],
-    )
+    try:
+        result = stop_environment(
+            Path(state["workspace"]),
+            state["issue_number"],
+        )
+    except RuntimeError as error:
+        result = {
+            "success": False,
+            "output": str(error),
+        }
 
     if not result["success"]:
         print("Cleanup warning:")
         print(result["output"][-2000:])
+        previous_reason = state.get("blocked_reason", "")
+        reason = (
+            f"{previous_reason}\n\nCleanup failed:\n{result['output']}"
+            if previous_reason
+            else f"Cleanup failed:\n{result['output']}"
+        )
+        return {
+            "workflow_status": "blocked",
+            "cleanup_status": "failure",
+            "cleanup_output": result["output"],
+            "cleanup_resume_stage": state.get("blocked_stage", ""),
+            "cleanup_resume_reason": state.get("blocked_reason", ""),
+            "blocked_reason": reason,
+            "blocked_stage": "cleanup",
+            "error": result["output"],
+        }
 
-    return {}
+    result_state = {
+        "cleanup_status": "success",
+        "cleanup_output": result["output"],
+    }
+
+    previous_stage = state.get("cleanup_resume_stage", "")
+    if previous_stage:
+        result_state.update(
+            {
+                "workflow_status": "blocked",
+                "blocked_stage": previous_stage,
+                "blocked_reason": state.get(
+                    "cleanup_resume_reason",
+                    "",
+                ),
+                "error": "",
+            }
+        )
+    elif state.get("pull_request_number"):
+        result_state.update(
+            {
+                "workflow_status": "completed",
+                "blocked_stage": "",
+                "blocked_reason": "",
+                "error": "",
+            }
+        )
+
+    return result_state
 
 
 def environment_failure_node(state: WorkflowState) -> dict:
@@ -732,6 +862,43 @@ def reviewer_node(state: WorkflowState) -> dict:
     }
 
 
+def prepare_review_comment_node(state: WorkflowState) -> dict:
+    if (
+        os.getenv("PUBLISH_REVIEW_COMMENT", "true").lower()
+        not in {"1", "true", "yes"}
+    ):
+        return {
+            "side_effect_intent": {},
+            "review_published": False,
+        }
+
+    intent = prepare_issue_comment_intent(
+        issue_number=state["issue_number"],
+        comment_kind="review",
+        marker="<!-- investory-orchestrator-review -->",
+        body=state["review_markdown"],
+        resume_node="publish_review",
+    )
+    existing = state.get("side_effect_intent", {})
+
+    if existing and existing != intent:
+        message = "Another side-effect operation is already prepared."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_review_comment",
+            "error": message,
+        }
+
+    return {
+        "workflow_status": "reviewing",
+        "side_effect_intent": intent,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
 def publish_review_node(state: WorkflowState) -> dict:
     publish_enabled = (
         os.getenv(
@@ -744,6 +911,20 @@ def publish_review_node(state: WorkflowState) -> dict:
     if not publish_enabled:
         print("Review publication disabled")
         return {"review_published": False}
+
+    intent = state.get("side_effect_intent", {})
+    if (
+        intent.get("status") != "prepared"
+        or intent.get("kind") != "issue_comment"
+        or intent.get("comment_kind") != "review"
+    ):
+        message = "Review comment is missing a prepared side-effect intent."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "publish_review",
+            "error": message,
+        }
 
     try:
         client = GitHubAppClient()
@@ -765,6 +946,11 @@ def publish_review_node(state: WorkflowState) -> dict:
 
     return {
         "review_published": True,
+        "side_effect_intent": {},
+        "side_effect_history": complete_intent(
+            intent,
+            list(state.get("side_effect_history", [])),
+        ),
         "blocked_stage": (
             "coder" if state["review_status"] == "changes_required" else ""
         ),
@@ -777,7 +963,7 @@ def route_after_reviewer(
     if state["review_status"] == "review_failure":
         return "blocked"
 
-    return "publish_review"
+    return "prepare_review_comment"
 
 
 def route_after_review_publication(
@@ -787,9 +973,41 @@ def route_after_review_publication(
         return "blocked"
 
     if state["review_status"] == "approved":
-        return "complete_step"
+        return "prepare_checkpoint"
 
     return "isolate_review_failure"
+
+
+def prepare_checkpoint_node(state: WorkflowState) -> dict:
+    index = state["current_step"]
+    step = state["steps"][index]
+    expected_parent_sha = state.get("step_baseline_sha") or current_head(
+        Path(state["workspace"])
+    )
+    intent = prepare_checkpoint_intent(
+        issue_number=state["issue_number"],
+        step_id=step["id"],
+        step_title=step["title"],
+        expected_parent_sha=expected_parent_sha,
+    )
+    existing = state.get("side_effect_intent", {})
+
+    if existing and existing != intent:
+        message = "Another side-effect operation is already prepared."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_checkpoint",
+            "error": message,
+        }
+
+    return {
+        "workflow_status": "implementing",
+        "side_effect_intent": intent,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
 
 
 def complete_step_node(state: WorkflowState) -> dict:
@@ -797,12 +1015,36 @@ def complete_step_node(state: WorkflowState) -> dict:
     steps = [dict(step) for step in state["steps"]]
     step = steps[index]
 
-    commit_sha = commit_step(
-        Path(state["workspace"]),
-        step["id"],
-        step["title"],
-        expected_parent_sha=state.get("step_baseline_sha") or None,
-    )
+    intent = state.get("side_effect_intent", {})
+    if intent and intent.get("kind") != "checkpoint":
+        message = "Checkpoint commit has an incompatible side-effect intent."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "complete_step",
+            "error": message,
+        }
+
+    try:
+        commit_sha = commit_step(
+            Path(state["workspace"]),
+            step["id"],
+            step["title"],
+            expected_parent_sha=(
+                intent.get("expected_parent_sha")
+                or state.get("step_baseline_sha")
+                or None
+            ),
+            operation_id=intent.get("operation_id"),
+        )
+    except RuntimeError as error:
+        message = str(error)
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "complete_step",
+            "error": message,
+        }
 
     step["status"] = "completed"
     step["attempts"] = state["attempt"]
@@ -830,6 +1072,15 @@ def complete_step_node(state: WorkflowState) -> dict:
             [*state.get("checkpoint_commits", []), commit_sha]
             if commit_sha
             else list(state.get("checkpoint_commits", []))
+        ),
+        "side_effect_intent": {},
+        "side_effect_history": (
+            complete_intent(
+                intent,
+                list(state.get("side_effect_history", [])),
+            )
+            if intent
+            else list(state.get("side_effect_history", []))
         ),
     }
 
@@ -1083,7 +1334,7 @@ def route_after_final_reviewer(state: WorkflowState) -> str:
         return "blocked"
 
     if state["final_review_status"] == "approved":
-        return "finalize_history"
+        return "prepare_finalize_history"
 
     if state["final_attempt"] == 0:
         return "final_integration_coder"
@@ -1184,14 +1435,61 @@ def route_after_final_failed_attempt(
     return "blocked"
 
 
+def prepare_finalize_history_node(state: WorkflowState) -> dict:
+    intent = prepare_finalization_intent(
+        issue_number=state["issue_number"],
+        baseline_sha=state["issue_baseline_sha"],
+        checkpoint_sha=state["final_baseline_sha"],
+    )
+    existing = state.get("side_effect_intent", {})
+
+    if existing and existing != intent:
+        message = "Another side-effect operation is already prepared."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "prepare_finalize_history",
+            "error": message,
+        }
+
+    return {
+        "workflow_status": "publishing",
+        "side_effect_intent": intent,
+        "blocked_reason": "",
+        "blocked_stage": "",
+        "error": "",
+    }
+
+
+def route_after_prepare_finalize_history(state: WorkflowState) -> str:
+    if state.get("workflow_status") == "blocked":
+        return "blocked"
+
+    return "finalize_history"
+
+
 def finalize_history_node(state: WorkflowState) -> dict:
     print("Replacing checkpoint commits with final logical commit")
+
+    intent = state.get("side_effect_intent", {})
+    if (
+        intent.get("status") != "prepared"
+        or intent.get("kind") != "finalization"
+    ):
+        message = "Final history rewrite is missing a prepared side-effect intent."
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": message,
+            "blocked_stage": "finalize_history",
+            "error": message,
+        }
 
     try:
         commit_sha = finalize_checkpoint_history(
             Path(state["workspace"]),
-            baseline_sha=state["issue_baseline_sha"],
-            expected_checkpoint_sha=state["final_baseline_sha"],
+            baseline_sha=intent["baseline_sha"],
+            expected_checkpoint_sha=intent["checkpoint_sha"],
+            operation_id=intent["operation_id"],
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
         )
@@ -1208,6 +1506,12 @@ def finalize_history_node(state: WorkflowState) -> dict:
     return {
         "final_commit_sha": commit_sha,
         "commit_sha": commit_sha,
+        "side_effect_intent": {},
+        "side_effect_history": complete_intent(
+            intent,
+            list(state.get("side_effect_history", [])),
+            commit_sha=commit_sha,
+        ),
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -1334,6 +1638,7 @@ def push_branch_node(state: WorkflowState) -> dict:
             client,
             Path(state["workspace"]),
             branch,
+            expected_local_sha=target_sha,
             expected_remote_sha=expected_remote_sha,
         )
 
@@ -1582,6 +1887,10 @@ def build_graph():
     builder.add_node("load_issue", load_issue)
     builder.add_node("planner", planner_node)
     builder.add_node(
+        "prepare_plan_comment",
+        prepare_plan_comment_node,
+    )
+    builder.add_node(
         "publish_plan",
         publish_plan_node,
     )
@@ -1636,9 +1945,14 @@ def build_graph():
     )
     builder.add_node("reviewer", reviewer_node)
     builder.add_node(
+        "prepare_review_comment",
+        prepare_review_comment_node,
+    )
+    builder.add_node(
         "publish_review",
         publish_review_node,
     )
+    builder.add_node("prepare_checkpoint", prepare_checkpoint_node)
     builder.add_node("complete_step", complete_step_node)
     builder.add_node(
         "prepare_final_review",
@@ -1663,6 +1977,10 @@ def build_graph():
     builder.add_node(
         "isolate_final_review_failure",
         isolate_final_review_failure_node,
+    )
+    builder.add_node(
+        "prepare_finalize_history",
+        prepare_finalize_history_node,
     )
     builder.add_node(
         "finalize_history",
@@ -1691,10 +2009,12 @@ def build_graph():
         "planner",
         route_after_planner,
         {
-            "publish_plan": "publish_plan",
+            "prepare_plan_comment": "prepare_plan_comment",
             "planning_failure": "planning_failure",
         },
     )
+
+    builder.add_edge("prepare_plan_comment", "publish_plan")
 
     builder.add_conditional_edges(
         "publish_plan",
@@ -1752,10 +2072,11 @@ def build_graph():
         "reviewer",
         route_after_reviewer,
         {
-            "publish_review": "publish_review",
+            "prepare_review_comment": "prepare_review_comment",
             "blocked": "blocked",
         },
     )
+    builder.add_edge("prepare_review_comment", "publish_review")
     builder.add_conditional_edges(
         "isolate_review_failure",
         route_after_failed_attempt,
@@ -1769,13 +2090,14 @@ def build_graph():
         "publish_review",
         route_after_review_publication,
         {
-            "complete_step": "complete_step",
+            "prepare_checkpoint": "prepare_checkpoint",
             "isolate_review_failure": (
                 "isolate_review_failure"
             ),
             "blocked": "blocked",
         },
     )
+    builder.add_edge("prepare_checkpoint", "complete_step")
 
     builder.add_conditional_edges(
         "complete_step",
@@ -1829,13 +2151,21 @@ def build_graph():
         "final_reviewer",
         route_after_final_reviewer,
         {
-            "finalize_history": "finalize_history",
+            "prepare_finalize_history": "prepare_finalize_history",
             "final_integration_coder": (
                 "final_integration_coder"
             ),
             "isolate_final_review_failure": (
                 "isolate_final_review_failure"
             ),
+            "blocked": "blocked",
+        },
+    )
+    builder.add_conditional_edges(
+        "prepare_finalize_history",
+        route_after_prepare_finalize_history,
+        {
+            "finalize_history": "finalize_history",
             "blocked": "blocked",
         },
     )
