@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.agents.codex_cli import codex_environment
+
 
 class CoderError(RuntimeError):
     pass
@@ -27,23 +29,13 @@ class CoderReport(BaseModel):
 
 
 def _coder_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    for name in (
-        "GITHUB_APP_ID",
-        "GITHUB_INSTALLATION_ID",
-        "GITHUB_PRIVATE_KEY_PATH",
-        "GITHUB_REPOSITORY",
-        "GITHUB_TOKEN",
-    ):
-        environment.pop(name, None)
-
-    return environment
+    return codex_environment()
 
 
 def coder_identity() -> dict[str, str]:
     return {
         "backend": "codex-cli",
-        "provider": os.getenv("CODER_PROVIDER", "unknown"),
+        "provider": "codex-cli",
         "model": os.getenv("CODER_MODEL", ""),
     }
 

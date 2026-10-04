@@ -22,8 +22,8 @@ Common environment settings:
 
 ```env
 GITHUB_APP_ID=...
-GITHUB_APP_PRIVATE_KEY=...
 GITHUB_INSTALLATION_ID=...
+GITHUB_PRIVATE_KEY_PATH=/run/secrets/github-app-key
 GITHUB_REPOSITORY=spider-su/investory
 
 WORKSPACES_DIR=/app/workspaces
@@ -40,15 +40,17 @@ PUBLISH_PLAN_COMMENT=true
 PUBLISH_REVIEW_COMMENT=true
 TARGET_ADAPTER=devcontainer_script
 AGENT_DEVCONTAINER_SCRIPT=scripts/agent-devcontainer.sh
-CODER_PROVIDER=...
-CODER_MODEL=...
-REVIEWER_PROVIDER=openai
-REVIEWER_MODEL=gpt-5.4-mini
+PLANNER_MODEL=
+CODER_MODEL=
+REVIEWER_MODEL=
 ```
 
-Planner and reviewer settings may target OpenAI, Azure OpenAI, or an
-OpenAI-compatible gateway such as Open WebUI. The current coding backend uses
-Codex CLI.
+Planner, coder, and reviewer all run as separate local Codex CLI invocations.
+They authenticate through the mounted Codex home directory; they do not use
+`OPENAI_API_KEY` or an OpenAI API project. Set role-specific model IDs only to
+models available to that Codex CLI account; replace the blank model settings in
+`.env` with the exact IDs you intend to use. The reviewer runs with a read-only
+sandbox and receives a fresh CLI invocation.
 
 ## Task queue
 
@@ -77,9 +79,10 @@ task `READY` only after all required checks pass. `--once` is intended for
 supervised runs; omit it for continuous polling.
 
 Final review qualification requires known, different coder and reviewer model
-identities. If `CODER_PROVIDER`/`CODER_MODEL` are blank or match the reviewer,
-the final review is recorded but the task remains blocked instead of claiming
-an independent approval.
+IDs. Set `CODER_MODEL` and `REVIEWER_MODEL` to different, explicit model IDs
+available to the local Codex CLI. If either ID is blank or they match, the
+final review is recorded but the task remains blocked instead of claiming an
+independent approval.
 
 ## Reviewer independence checks
 
@@ -112,9 +115,11 @@ identities are available and differ. Otherwise it labels the result
 
 ## Credentials
 
-When Codex CLI is used, set `HOST_CODEX_DIR` to the authenticated host Codex
-directory. Compose mounts it read-only at `/root/.codex-source` and copies it
-into a writable container-local `/root/.codex` runtime directory at startup:
+Set `HOST_CODEX_DIR` to the authenticated host Codex directory (usually
+`/Users/<you>/.codex` on macOS). Compose mounts it read-only at
+`/root/.codex-source` and copies it into a writable container-local
+`/root/.codex` runtime directory at startup. All three agent roles use this
+login, so no OpenAI API key is needed:
 
 ```yaml
 services:
@@ -123,8 +128,11 @@ services:
       - ${HOST_CODEX_DIR}:/root/.codex-source:ro
 ```
 
-Do not commit API keys, GitHub private keys, Codex credentials, or generated
-installation tokens. Git push uses a short-lived GitHub App installation token.
+Store the GitHub App PEM at `secrets/github-app.pem` on the host; Compose
+mounts it at `GITHUB_PRIVATE_KEY_PATH=/run/secrets/github-app-key`. GitHub
+credentials and `OPENAI_API_KEY` are removed from every Codex child process.
+Do not commit GitHub private keys, Codex credentials, or generated installation
+tokens. Git push uses a short-lived GitHub App installation token.
 
 ## Run and resume
 

@@ -1,5 +1,4 @@
 langgraph
-langchain-openai
 langgraph-checkpoint-sqlite
 PyGithub
 cryptography
