@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -56,6 +57,21 @@ class CoderTests(unittest.TestCase):
         def fake_run(*args: object, **kwargs: object) -> CompletedProcessResult:
             captured.update(kwargs)
             captured["command"] = args[0]
+            command = args[0]
+            output_path = Path(
+                command[command.index("--output-last-message") + 1]
+            )
+            output_path.write_text(
+                json.dumps({
+                    "status": "completed",
+                    "summary": "Implemented tests for agents.",
+                    "changes": ["tests/test_agents.py"],
+                    "testsRun": [],
+                    "remainingProblems": [],
+                    "needsHumanInput": False,
+                }),
+                encoding="utf-8",
+            )
             return CompletedProcessResult(
                 returncode=0,
                 stdout="Implemented tests for agents.",
@@ -79,19 +95,12 @@ class CoderTests(unittest.TestCase):
                         failed_patch_path="",
                     )
 
-        self.assertEqual(summary, "Implemented tests for agents.")
-        self.assertEqual(
-            captured["command"],
-            [
-                "codex",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "-",
-                "--model",
-                "gpt-coder",
-            ],
-        )
+        self.assertEqual(summary.summary, "Implemented tests for agents.")
+        command = captured["command"]
+        self.assertEqual(command[:4], ["codex", "exec", "--sandbox", "workspace-write"])
+        self.assertIn("--output-schema", command)
+        self.assertIn("--output-last-message", command)
+        self.assertEqual(command[-3:], ["--model", "gpt-coder", "-"])
         self.assertEqual(captured["cwd"], self.workspace)
         self.assertEqual(captured["timeout"], 1800)
         self.assertEqual(captured["stderr"], subprocess.STDOUT)
@@ -100,6 +109,8 @@ class CoderTests(unittest.TestCase):
 
         prompt = captured["input"]
         self.assertIn("Implement GitHub issue #42", prompt)
+        self.assertIn('"testsRun"', prompt)
+        self.assertIn('"needsHumanInput"', prompt)
         self.assertIn("{'id': 'step-01', 'title': 'Add tests'}", prompt)
         self.assertIn("Previous validation failed.", prompt)
         self.assertIn("{'status': 'changes_required'}", prompt)
@@ -184,4 +195,3 @@ class CoderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

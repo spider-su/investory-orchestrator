@@ -26,6 +26,33 @@ operator-approved GitHub issue
     → create or update draft PR
 ```
 
+The persistent task lifecycle wraps the issue execution graph. Task transitions
+are validated in `app.tasks`; graph checkpoints continue to store detailed
+per-node execution state. A task becomes `READY` only after local validation,
+the pre-publication implementation review, draft PR creation, green GitHub
+checks, and a fresh final PR review with a known identity distinct from the
+coder. The scheduler never treats an agent response as authority to complete a
+task.
+
+Task states are `QUEUED`, `PLANNING`, `IMPLEMENTING`, `VALIDATING`,
+`REVIEWING`, `PUBLISHING`, `WAITING_CI`, `FINAL_REVIEW`, `READY`, `BLOCKED`,
+and `FAILED`. SQLite persists task records separately from LangGraph
+checkpoints. The queue claims a task in a transaction before launching its
+worker. Waiting for CI occupies no worker process. A stopped worker is
+reconciled against its checkpoint on the next queue pass; an interrupted coder
+with a dirty worktree remains blocked for inspection.
+
+Agent boundaries are structured: the planner returns a plan with assumptions,
+acceptance criteria, ordered steps, and validation; Codex returns a schema
+validated report with status, changes, tests run, remaining problems, and
+whether human input is needed; reviewers return a verdict and findings.
+Validation remains deterministic command execution through `TargetAdapter`.
+
+Each issue or prompt task gets a branch and a linked Git worktree. A shared
+bare clone is cached under the workspaces directory so worktrees remain
+separate without cloning the full repository for every task. Direct prompt
+tasks use the configured target repository and do not publish issue comments.
+
 The workflow is supervised. The operator currently owns issue-readiness
 preflight and final pull-request approval.
 
@@ -251,8 +278,20 @@ After all steps are checkpointed:
 4. Replace checkpoint history with the final logical commit.
 5. Push `agent/issue-<number>`.
 6. Reuse an existing open PR for that branch, or create a draft PR.
-7. Mark the workflow completed only after the PR operation succeeds.
+7. Mark the implementation graph completed only after the PR operation succeeds.
 8. Stop the Dev Container environment.
+9. The task scheduler records `WAITING_CI`, freeing its worker slot.
+10. Poll commit statuses and check runs. A failed check feeds its recorded
+    output into the bounded whole-plan repair path; repair is validated,
+    reviewed, pushed, and checked again.
+11. After CI is green, run a fresh whole-plan review against the final PR diff.
+    Require a known reviewer identity distinct from the coder before marking
+    the task `READY`.
+
+CI repair and final-review repair share the `CI_RETRY_ATTEMPTS` limit. Exhausted
+repairs remain `BLOCKED` with CI output or review findings attached to task
+metadata. Infrastructure failures also block without consuming an agent repair
+attempt.
 
 The orchestrator never merges automatically.
 

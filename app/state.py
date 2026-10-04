@@ -13,6 +13,9 @@ CiStatus: TypeAlias = str
 
 
 class WorkflowState(TypedDict):
+    task_id: str
+    task_source: str
+    ci_repair_requested: bool
     issue_number: int
     issue_title: str
     issue_body: str
@@ -56,6 +59,7 @@ class WorkflowState(TypedDict):
     final_commit_sha: Optional[str]
 
     coder_summary: str
+    coder_report: dict[str, Any]
     coder_error: str
     coder_backend: str
     coder_provider: str

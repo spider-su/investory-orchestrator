@@ -77,14 +77,19 @@ def create_plan(
         method="json_schema",
     )
 
+    task_reference = (
+        f"task {abs(issue_number)}"
+        if issue_number < 0
+        else f"GitHub issue #{issue_number}"
+    )
     prompt = f"""
 You are the planning agent for the Investory repository.
 
 Convert the GitHub issue into a small, ordered, and testable implementation
 plan. Do not write code.
 
-GitHub issue number:
-#{issue_number}
+Task reference:
+{task_reference}
 
 Title:
 {issue_title}

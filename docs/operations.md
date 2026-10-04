@@ -27,17 +27,59 @@ GITHUB_INSTALLATION_ID=...
 GITHUB_REPOSITORY=spider-su/investory
 
 WORKSPACES_DIR=/app/workspaces
+TASK_DB=/app/data/tasks.db
+BASE_BRANCH=main
 MAX_ATTEMPTS=3
 MAX_FINAL_ATTEMPTS=3
+CI_RETRY_ATTEMPTS=3
+MAX_ACTIVE_TASKS=3
+MAX_CODEX_PROCESSES=2
+MAX_BUILDS=1
+QUEUE_POLL_SECONDS=30
 PUBLISH_PLAN_COMMENT=true
 PUBLISH_REVIEW_COMMENT=true
 TARGET_ADAPTER=devcontainer_script
 AGENT_DEVCONTAINER_SCRIPT=scripts/agent-devcontainer.sh
+CODER_PROVIDER=...
+CODER_MODEL=...
+REVIEWER_PROVIDER=openai
+REVIEWER_MODEL=gpt-5.4-mini
 ```
 
 Planner and reviewer settings may target OpenAI, Azure OpenAI, or an
 OpenAI-compatible gateway such as Open WebUI. The current coding backend uses
 Codex CLI.
+
+## Task queue
+
+Queue a GitHub issue or a direct task prompt:
+
+```bash
+python -m app --submit-issue 123
+python -m app --submit-task "Fix portfolio export" --body "Expected behavior..."
+```
+
+Run the persistent queue, inspect status, or run one pass:
+
+```bash
+python -m app --run-queue
+python -m app --run-queue --once
+python -m app --list-tasks
+python -m app --status <task-id>
+```
+
+`TASK_DB` must be on persistent storage. Compose mounts `./data` for task
+records and LangGraph checkpoints. The scheduler claims work atomically in
+SQLite and applies the minimum of the active-task, Codex-process, and build
+limits. A task in `WAITING_CI` has no active worker. The scheduler polls GitHub
+Actions and commit statuses, starts bounded CI/final-review repair, and marks a
+task `READY` only after all required checks pass. `--once` is intended for
+supervised runs; omit it for continuous polling.
+
+Final review qualification requires known, different coder and reviewer model
+identities. If `CODER_PROVIDER`/`CODER_MODEL` are blank or match the reviewer,
+the final review is recorded but the task remains blocked instead of claiming
+an independent approval.
 
 ## Reviewer independence checks
 

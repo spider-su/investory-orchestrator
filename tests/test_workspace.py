@@ -106,18 +106,58 @@ class WorkspaceTests(unittest.TestCase):
             [
                 "git",
                 "clone",
-                "--branch",
-                "agent/issue-42",
+                "--bare",
                 "https://github.com/owner/repository.git",
-                str(Path(directory) / "issue-42"),
+                str(Path(directory) / ".repositories" / "owner_repository.git"),
             ],
             env=ANY,
         )
-        self.assertFalse(
-            any(
-                call.args[0][:3] == ["git", "checkout", "-b"]
-                for call in run_mock.call_args_list
-            )
+        run_mock.assert_any_call(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                "agent/issue-42",
+                str(Path(directory) / "issue-42"),
+                "refs/remotes/origin/agent/issue-42",
+            ],
+            cwd=Path(directory) / ".repositories" / "owner_repository.git",
+        )
+
+    def test_prompt_task_uses_task_workspace_and_branch(self) -> None:
+        client = SimpleNamespace(
+            token="token",
+            repository_name="owner/repository",
+            get_branch_head_sha=Mock(return_value=None),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"WORKSPACES_DIR": directory, "BASE_BRANCH": "develop"},
+            ):
+                with patch("app.workspace._run") as run_mock:
+                    with patch("app.workspace._mark_safe_directory"):
+                        with patch("app.workspace._configure_git_identity"):
+                            workspace, branch = prepare_workspace(
+                                client,
+                                -123,
+                                task_id="abc123",
+                            )
+
+        self.assertEqual(workspace, Path(directory) / "task-abc123")
+        self.assertEqual(branch, "agent/task-abc123")
+        run_mock.assert_any_call(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                "agent/task-abc123",
+                str(Path(directory) / "task-abc123"),
+                "refs/remotes/origin/develop",
+            ],
+            cwd=Path(directory) / ".repositories" / "owner_repository.git",
         )
 
         with patch(

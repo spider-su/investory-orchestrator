@@ -116,6 +116,7 @@ class GraphCompletionTests(unittest.TestCase):
             "current_step": 0,
             "attempt": 1,
             "max_attempts": 3,
+            "step_baseline_sha": "baseline-sha",
             "test_output": "",
             "review": {},
             "last_failed_patch_path": "",
@@ -442,4 +443,3 @@ class GraphCompletionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

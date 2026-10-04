@@ -6,6 +6,14 @@ from collections.abc import Callable
 from typing import Any
 
 from app.state import WorkflowState
+from app.tasks import TaskStatus, TaskStore
+from app.task_scheduler import (
+    _print_task,
+    _sync_task_result,
+    _task_status_for_workflow,
+    _track_task_state,
+    run_queue,
+)
 
 
 GraphFactory = Callable[[], Any]
@@ -22,11 +30,21 @@ def _close_graph(graph: Any) -> None:
         close()
 
 
-def build_initial_state(issue_number: int) -> WorkflowState:
+def build_initial_state(
+    issue_number: int,
+    task_id: str = "",
+    *,
+    source: str = "github_issue",
+    title: str = "",
+    body: str = "",
+) -> WorkflowState:
     return {
+        "task_id": task_id,
+        "task_source": source,
+        "ci_repair_requested": False,
         "issue_number": issue_number,
-        "issue_title": "",
-        "issue_body": "",
+        "issue_title": title,
+        "issue_body": body,
         "repository_context": "",
         "workflow_status": "new",
         "plan": {},
@@ -85,6 +103,7 @@ def build_initial_state(issue_number: int) -> WorkflowState:
         "review_context_fresh": False,
         "review_read_only": False,
         "coder_summary": "",
+        "coder_report": {},
         "coder_error": "",
         "coder_backend": "",
         "coder_provider": "",
@@ -120,7 +139,17 @@ def run_cli(
     argv: list[str] | None = None,
 ) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--issue", type=int, required=True)
+    parser.add_argument("--issue", type=int)
+    parser.add_argument("--task-id")
+    parser.add_argument("--ci-repair", action="store_true")
+    parser.add_argument("--submit-issue", type=int)
+    parser.add_argument("--submit-task", metavar="TITLE")
+    parser.add_argument("--update-task", metavar="TASK_ID")
+    parser.add_argument("--body", help="Task description or updated task body.")
+    parser.add_argument("--status", metavar="TASK_ID")
+    parser.add_argument("--list-tasks", action="store_true")
+    parser.add_argument("--run-queue", action="store_true")
+    parser.add_argument("--once", action="store_true")
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -128,14 +157,133 @@ def run_cli(
     )
     args = parser.parse_args(argv)
 
+    task_store = (
+        TaskStore(os.getenv("TASK_DB", "/app/data/tasks.db"))
+        if (
+            args.submit_issue is not None
+            or args.submit_task
+            or args.update_task
+            or args.status
+            or args.list_tasks
+            or args.run_queue
+            or args.task_id
+        )
+        else None
+    )
+    if args.submit_issue is not None:
+        from app.github_client import GitHubAppClient
+
+        issue = GitHubAppClient().get_issue(args.submit_issue)
+        task = task_store.create(
+            issue_number=issue.number,
+            title=issue.title,
+            body=issue.body or "",
+            source="github_issue",
+        )
+        print(f"Queued task {task.task_id}: {task.title}")
+        return
+    if args.submit_task:
+        task = task_store.create(
+            title=args.submit_task,
+            body=args.body or "",
+            source="prompt",
+        )
+        print(f"Queued task {task.task_id}: {task.title}")
+        return
+    if args.update_task:
+        if args.body is None:
+            parser.error("--body is required with --update-task")
+        task = task_store.get(args.update_task)
+        if task is None:
+            raise RuntimeError(f"Task not found: {args.update_task}")
+        if task.source != "prompt" or task.status != TaskStatus.BLOCKED:
+            raise RuntimeError(
+                "Only a blocked prompt task can be updated here; update a "
+                "GitHub issue in GitHub and resume it."
+            )
+        task = task_store.transition(
+            task.task_id,
+            task.status,
+            body=args.body,
+            blocked_reason="",
+        )
+        print(f"Updated task body: {task.task_id}")
+        return
+    if args.status:
+        task = task_store.get(args.status)
+        if task is None:
+            raise RuntimeError(f"Task not found: {args.status}")
+        _print_task(task)
+        return
+    if args.list_tasks:
+        for task in task_store.list():
+            _print_task(task)
+        return
+    if args.run_queue:
+        run_queue(task_store, once=args.once)
+        return
+    task_input = task_store.get(args.task_id) if args.task_id else None
+    if args.task_id and task_input is None:
+        raise RuntimeError(f"Task not found: {args.task_id}")
+    if args.issue is None and task_input is None:
+        parser.error("--issue or an existing --task-id is required")
+    if args.issue is None and task_input and task_input.issue_number is not None:
+        args.issue = task_input.issue_number
+    if args.issue is None and task_input:
+        args.issue = -max(1, int(task_input.task_id, 16))
+    assert args.issue is not None
+
     config = config_for_issue(args.issue)
     graph = build_graph()
 
+    def invoke_with_tracking(initial_state: dict | None) -> None:
+        if not args.task_id:
+            if initial_state is None:
+                graph.invoke(None, config=config)
+            else:
+                graph.invoke(initial_state, config=config)
+            return
+        if initial_state is not None:
+            _track_task_state(task_store, args.task_id, TaskStatus.PLANNING)
+            stream = graph.stream(
+                initial_state, config=config, stream_mode="values"
+            )
+        else:
+            stream = graph.stream(None, config=config, stream_mode="values")
+        for state in stream:
+            status = _task_status_for_workflow(state.get("workflow_status", ""))
+            if status is not None:
+                _track_task_state(
+                    task_store,
+                    args.task_id,
+                    status,
+                    workspace=state.get("workspace", ""),
+                    branch=state.get("branch", ""),
+                    implementation_attempts=(
+                        sum(step.get("attempts", 0) for step in state.get("steps", []))
+                        + state.get("attempt", 0)
+                        + state.get("final_attempt", 0)
+                    ),
+                    validation_attempts=(
+                        sum(step.get("attempts", 0) for step in state.get("steps", []))
+                        + state.get("attempt", 0)
+                        + state.get("final_attempt", 0)
+                    ),
+                )
+        snapshot = graph.get_state(config)
+        final_state = dict(snapshot.values)
+        _sync_task_result(task_store, args.task_id, final_state)
+
     if not args.resume:
         try:
-            graph.invoke(
-                build_initial_state(args.issue),
-                config=config,
+            invoke_with_tracking(
+                build_initial_state(
+                    args.issue,
+                    args.task_id,
+                    source=(task_input.source if task_input else "github_issue"),
+                    title=(task_input.title if task_input else ""),
+                    body=(task_input.body if task_input else ""),
+                )
             )
         finally:
             _close_graph(graph)
@@ -145,11 +293,79 @@ def run_cli(
         snapshot = graph.get_state(config)
 
         if not snapshot.values:
-            raise RuntimeError(
-                f"No checkpoint exists for issue #{args.issue}"
-            )
+            if task_input is not None:
+                invoke_with_tracking(
+                    build_initial_state(
+                        args.issue,
+                        args.task_id,
+                        source=task_input.source,
+                        title=task_input.title,
+                        body=task_input.body,
+                    )
+                )
+                return
+            raise RuntimeError(f"No checkpoint exists for issue #{args.issue}")
 
         saved_state = dict(snapshot.values)
+        if args.ci_repair:
+            task = task_store.get(args.task_id or str(args.issue))
+            if task is None or not (
+                task.ci_status == "failed"
+                or task.metadata.get("final_review_status") == "changes_required"
+            ):
+                raise RuntimeError("No CI or final-review repair is saved for this task.")
+            details = task.metadata.get("ci_details", [])
+            output = "\n".join(
+                f"{item.get('name')}: {item.get('conclusion')} "
+                f"{item.get('url')}\n{item.get('output', '')}"
+                for item in details
+                if task.ci_status == "failed"
+                and item.get("conclusion") not in {"success", "skipped", "neutral"}
+            )
+            if task.metadata.get("final_review_status") == "changes_required":
+                output = task.metadata.get("final_review_feedback", output)
+            if not output:
+                output = "CI checks failed; inspect the linked checks."
+            graph.update_state(
+                config,
+                {
+                    "workflow_status": "implementing",
+                    "ci_repair_requested": True,
+                    "final_attempt": 0,
+                    "final_validation_status": "project_validation_failure",
+                    "final_validation_output": output or "CI checks failed; inspect the linked checks.",
+                    "final_review_status": "not_started",
+                    "final_review": {},
+                    "blocked_reason": "",
+                    "blocked_stage": "",
+                    "error": "",
+                },
+                as_node="prepare_final_review",
+            )
+            invoke_with_tracking(None)
+            return
+        if saved_state.get("workflow_status") == "completed":
+            if args.task_id:
+                _sync_task_result(task_store, args.task_id, saved_state)
+            return
+        if saved_state.get("workflow_status") != "blocked":
+            if not snapshot.next:
+                raise RuntimeError(
+                    "Saved workflow has no pending node; inspect its state "
+                    "before restarting."
+                )
+            next_nodes = set(snapshot.next)
+            if next_nodes & {"coder", "final_integration_coder"}:
+                from app.retry_isolation import workspace_has_changes
+
+                workspace = Path(saved_state.get("workspace", ""))
+                if workspace.exists() and workspace_has_changes(workspace):
+                    raise RuntimeError(
+                        "A coder was interrupted with workspace changes. "
+                        "Preserve and inspect the diff before resuming."
+                    )
+            invoke_with_tracking(None)
+            return
         blocked_stage = saved_state.get("blocked_stage", "")
         resume_from = resolve_resume_from(saved_state)
 
@@ -200,16 +416,32 @@ def run_cli(
         }
 
         if blocked_stage == "awaiting_user_input":
-            resume_updates.update(
-                reload_issue_for_planning(args.issue)
-            )
+            if task_input is not None and task_input.source == "prompt":
+                refreshed = task_store.get(task_input.task_id)
+                resume_updates.update({
+                    "issue_title": refreshed.title,
+                    "issue_body": refreshed.body,
+                    "workflow_status": "planning",
+                    "plan": {},
+                    "plan_markdown": "",
+                    "plan_published": False,
+                    "planning_error": "",
+                    "requires_user_input": False,
+                    "steps": [],
+                    "current_step": 0,
+                    "completed_steps": [],
+                })
+            else:
+                resume_updates.update(
+                    reload_issue_for_planning(args.issue)
+                )
 
         graph.update_state(
             config,
             resume_updates,
             as_node=resume_from,
         )
-        graph.invoke(None, config=config)
+        invoke_with_tracking(None)
     finally:
         _close_graph(graph)
 
