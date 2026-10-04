@@ -5,8 +5,9 @@ import subprocess
 from pathlib import Path
 from typing import Literal
 
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+
+from app.agents.codex_cli import CodexCliError, run_structured_prompt
 
 
 ReviewStatus = Literal["approved", "changes_required"]
@@ -35,16 +36,13 @@ class ReviewerError(RuntimeError):
 
 
 def review_model() -> str:
-    return os.getenv(
-        "REVIEWER_MODEL",
-        os.getenv("PLANNER_MODEL", "gpt-5.4-mini"),
-    )
+    return os.getenv("REVIEWER_MODEL", "")
 
 
 def review_identity() -> dict[str, str]:
     return {
-        "backend": "langchain-openai",
-        "provider": os.getenv("REVIEWER_PROVIDER", "openai"),
+        "backend": "codex-cli",
+        "provider": "codex-cli",
         "model": review_model(),
     }
 
@@ -208,16 +206,6 @@ def review_implementation(
     review_scope: ReviewScope = "step",
     baseline_sha: str | None = None,
 ) -> ReviewResult:
-    model = ChatOpenAI(
-        model=review_model(),
-        temperature=0,
-    )
-
-    structured_model = model.with_structured_output(
-        ReviewResult,
-        method="json_schema",
-    )
-
     scope_rules = (
         """
 - Review the complete implementation across every plan step.
@@ -278,16 +266,19 @@ Review rules:
 """.strip()
 
     try:
-        result = structured_model.invoke(prompt)
-    except Exception as error:
+        result = run_structured_prompt(
+            role="reviewer",
+            prompt=prompt,
+            response_model=ReviewResult,
+            workspace=workspace,
+            model=review_model(),
+        )
+    except CodexCliError as error:
         raise ReviewerError(
             f"Reviewer failed to produce a structured result: {error}"
         ) from error
-
     if not isinstance(result, ReviewResult):
-        raise ReviewerError(
-            "Reviewer returned an unexpected response type."
-        )
+        raise ReviewerError("Reviewer returned an unexpected response type.")
 
     if result.missing_requirements or any(
         finding.severity == "blocking"

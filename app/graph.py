@@ -82,6 +82,7 @@ def planner_node(state: WorkflowState) -> dict:
             issue_title=state["issue_title"],
             issue_body=state["issue_body"],
             repository_context=state["repository_context"],
+            workspace=Path(state["workspace"]),
         )
     except PlannerError as error:
         message = str(error)

@@ -1,9 +1,10 @@
 # Investory Orchestrator
 
 Investory Orchestrator turns queued GitHub issues or direct prompts into
-reviewed draft pull requests. It coordinates planning, coding, deterministic
-validation, review, Git worktrees, GitHub Actions, repair loops, and a durable
-SQLite task queue.
+reviewed draft pull requests. Planner, coder, and reviewer roles run through
+the local Codex CLI; GitHub operations use a GitHub App. It coordinates
+deterministic validation, Git worktrees, GitHub Actions, repair loops, and a
+durable SQLite task queue.
 
 It does not merge pull requests automatically. Human review remains the final
 approval step.
@@ -73,10 +74,12 @@ CI does not occupy a worker slot. CI and final-review repairs are bounded by
 `CI_RETRY_ATTEMPTS` (default 3). The existing implementation and validation
 repair loops use `MAX_ATTEMPTS` and `MAX_FINAL_ATTEMPTS`.
 
-To qualify the final review as independent, configure known, different coder
-and reviewer identities with `CODER_PROVIDER`, `CODER_MODEL`,
-`REVIEWER_PROVIDER`, and `REVIEWER_MODEL`. The task cannot become READY when
-those identities match or are unknown.
+The planner, coder, and reviewer use the authenticated Codex CLI, not the
+OpenAI API. Set `HOST_CODEX_DIR` to the host's authenticated Codex directory.
+Set explicit model identities with `CODER_MODEL`, `PLANNER_MODEL`, and
+`REVIEWER_MODEL`. To qualify the final review as independent, the coder and
+reviewer model IDs must both be known and different. The task cannot become
+READY when those identities match or are missing.
 
 ## Current limitations
 
@@ -87,7 +90,6 @@ those identities match or are unknown.
   inspection instead of being reset automatically.
 - Existing graph recovery still needs broader crash-boundary testing around
   local commits and final history rewriting.
-- Agent backends remain configured through their current individual clients.
 - Human approval and merge remain outside the orchestrator.
 - Codex execution depends on available authentication and usage quota.
 

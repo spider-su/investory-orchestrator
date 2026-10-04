@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+
+from app.agents.codex_cli import CodexCliError, run_structured_prompt
 
 
 class PlanStep(BaseModel):
@@ -66,17 +68,8 @@ def create_plan(
     issue_title: str,
     issue_body: str,
     repository_context: str,
+    workspace: Path,
 ) -> ImplementationPlan:
-    model = ChatOpenAI(
-        model=os.getenv("PLANNER_MODEL", "gpt-5.4-mini"),
-        temperature=0,
-    )
-
-    structured_model = model.with_structured_output(
-        ImplementationPlan,
-        method="json_schema",
-    )
-
     task_reference = (
         f"task {abs(issue_number)}"
         if issue_number < 0
@@ -117,17 +110,19 @@ Planning rules:
 """.strip()
 
     try:
-        result = structured_model.invoke(prompt)
-    except Exception as error:
+        result = run_structured_prompt(
+            role="planner",
+            prompt=prompt,
+            response_model=ImplementationPlan,
+            workspace=workspace,
+            model=os.getenv("PLANNER_MODEL", ""),
+        )
+    except CodexCliError as error:
         raise PlannerError(
             f"Planner failed to create a structured plan: {error}"
         ) from error
-
     if not isinstance(result, ImplementationPlan):
-        raise PlannerError(
-            "Planner returned an unexpected response type."
-        )
-
+        raise PlannerError("Planner returned an unexpected response type.")
     return result
 
 
