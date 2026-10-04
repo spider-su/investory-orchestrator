@@ -4,6 +4,8 @@ import json
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -27,14 +29,14 @@ class TaskStatus(StrEnum):
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.QUEUED: frozenset({TaskStatus.PLANNING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.PLANNING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.IMPLEMENTING: frozenset({TaskStatus.VALIDATING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
+    TaskStatus.IMPLEMENTING: frozenset({TaskStatus.VALIDATING, TaskStatus.PUBLISHING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.VALIDATING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.REVIEWING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.REVIEWING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.PUBLISHING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.PUBLISHING: frozenset({TaskStatus.WAITING_CI, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.WAITING_CI: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.FINAL_REVIEW, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.FINAL_REVIEW: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.READY: frozenset(),
-    TaskStatus.BLOCKED: frozenset({TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.VALIDATING, TaskStatus.REVIEWING, TaskStatus.PUBLISHING, TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW, TaskStatus.FAILED}),
+    TaskStatus.BLOCKED: frozenset({TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.VALIDATING, TaskStatus.REVIEWING, TaskStatus.PUBLISHING, TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW, TaskStatus.READY, TaskStatus.FAILED}),
     TaskStatus.FAILED: frozenset({TaskStatus.QUEUED}),
 }
 
@@ -76,8 +78,17 @@ class TaskStore:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
@@ -121,9 +132,13 @@ class TaskStore:
         source: str = "prompt",
         metadata: dict[str, Any] | None = None,
     ) -> Task:
+        if issue_number is not None:
+            existing = self.get(str(issue_number))
+            if existing is not None:
+                return existing
         now = time.time()
         task_id = str(issue_number) if issue_number is not None else uuid.uuid4().hex[:12]
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """INSERT INTO tasks
                 (task_id, source, issue_number, title, body, status, metadata,
@@ -138,7 +153,7 @@ class TaskStore:
         return self._task(row)
 
     def get(self, task_id: str) -> Task | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM tasks WHERE task_id=? OR issue_number=?",
                 (task_id, task_id if task_id.isdigit() else None),
@@ -146,7 +161,7 @@ class TaskStore:
         return self._task(row) if row else None
 
     def list(self, statuses: set[TaskStatus] | None = None) -> list[Task]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             if statuses:
                 values = [status.value for status in statuses]
                 marks = ",".join("?" for _ in values)
@@ -176,7 +191,7 @@ class TaskStore:
         unknown = set(updates) - allowed_fields
         if unknown:
             raise ValueError(f"Unsupported task fields: {sorted(unknown)}")
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM tasks WHERE task_id=?", (task_id,)
@@ -192,6 +207,29 @@ class TaskStore:
                 raise ValueError(
                     f"Invalid task transition: {current.value} -> {status.value}"
                 )
+            if status == TaskStatus.READY:
+                metadata_value = updates.get("metadata")
+                metadata = (
+                    metadata_value
+                    if isinstance(metadata_value, dict)
+                    else json.loads(metadata_value or row["metadata"])
+                )
+                ci_status = updates.get("ci_status", row["ci_status"])
+                missing = []
+                if ci_status != "green":
+                    missing.append("green CI")
+                if not updates.get("pr_number", row["pr_number"]) or not updates.get("pr_url", row["pr_url"]):
+                    missing.append("draft PR")
+                if metadata.get("final_validation_status") != "validation_success":
+                    missing.append("successful local validation")
+                if metadata.get("final_review_status") != "approved":
+                    missing.append("approved independent review")
+                if metadata.get("final_review_independence") != "independent":
+                    missing.append("reviewer independence")
+                if not metadata.get("ready_gates", {}).get("clean_worktree"):
+                    missing.append("clean worktree evidence")
+                if missing:
+                    raise ValueError("Cannot mark task READY without " + ", ".join(missing))
             serialized = {
                 key: json.dumps(value) if key == "metadata" else value
                 for key, value in updates.items()

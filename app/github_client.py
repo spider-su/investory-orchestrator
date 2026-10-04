@@ -277,6 +277,64 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def get_pull_request_ci(
+        self,
+        pull_request_number: int | None,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Return pending, success, or failure for the PR head's checks."""
+        if pull_request_number is None:
+            raise RuntimeError("Task has no pull request to inspect for CI.")
+        pull = self.get_pull_request(pull_request_number)
+        repository = self.get_repository()
+        commit = repository.get_commit(pull.head.sha)
+        results: list[dict[str, str]] = []
+        pending = False
+        failed = False
+
+        for check in commit.get_check_runs():
+            conclusion = (check.conclusion or "").lower()
+            status = (check.status or "").lower()
+            output = getattr(check, "output", None)
+            results.append({
+                "name": check.name,
+                "status": status,
+                "conclusion": conclusion,
+                "url": check.html_url or "",
+                "output": "\n".join(
+                    part
+                    for part in (
+                        getattr(output, "title", ""),
+                        getattr(output, "summary", ""),
+                        getattr(output, "text", ""),
+                    )
+                    if part
+                )[-20_000:],
+            })
+            if status != "completed":
+                pending = True
+            elif conclusion not in {"success", "skipped", "neutral"}:
+                failed = True
+
+        combined = commit.get_combined_status()
+        for item in combined.statuses:
+            state = (item.state or "").lower()
+            results.append({
+                "name": item.context,
+                "status": state,
+                "conclusion": state,
+                "url": item.target_url or "",
+            })
+            if state == "pending":
+                pending = True
+            elif state not in {"success", ""}:
+                failed = True
+
+        if failed:
+            return "failure", results
+        if pending or not results:
+            return "pending", results
+        return "success", results
+
     def add_pull_request_comment(
         self,
         pull_request_number: int,

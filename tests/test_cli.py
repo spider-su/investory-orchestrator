@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.cli import build_initial_state, run_cli
+from app.tasks import TaskStatus, TaskStore
 
 
 class FakeGraph:
@@ -29,6 +31,9 @@ class FakeGraph:
     def invoke(self, state, *, config: dict):
         self.invocations.append((state, config))
         return state
+
+    def stream(self, state, *, config: dict, stream_mode: str):
+        return iter(())
 
 
 class CliTests(unittest.TestCase):
@@ -122,6 +127,42 @@ class CliTests(unittest.TestCase):
         self.assertEqual(state["side_effect_intent"], {})
         self.assertEqual(state["side_effect_history"], [])
         self.assertEqual(state["workflow_status"], "new")
+
+    def test_ci_repair_routes_saved_feedback_to_final_integration_coder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "tasks.db")
+            store = TaskStore(database)
+            task = store.create(title="Repair CI")
+            task = store.transition(task.task_id, TaskStatus.BLOCKED)
+            store.transition(
+                task.task_id,
+                TaskStatus.BLOCKED,
+                ci_status="failed",
+                pr_number=8,
+                pr_url="https://example.test/pr/8",
+                metadata={
+                    "ci_details": [{
+                        "name": "tests",
+                        "conclusion": "failure",
+                        "url": "https://example.test/check/1",
+                        "output": "assertion failed",
+                    }]
+                },
+            )
+            graph = FakeGraph({"workflow_status": "blocked"})
+
+            with patch.dict(os.environ, {"TASK_DB": database}):
+                run_cli(
+                    build_graph=lambda: graph,
+                    resolve_resume_from=Mock(),
+                    reload_issue_for_planning=Mock(),
+                    argv=["--task-id", task.task_id, "--resume", "--ci-repair"],
+                )
+
+        _config, updates, as_node = graph.updates[0]
+        self.assertEqual(as_node, "prepare_final_review")
+        self.assertTrue(updates["ci_repair_requested"])
+        self.assertIn("assertion failed", updates["final_validation_output"])
 
 
 if __name__ == "__main__":

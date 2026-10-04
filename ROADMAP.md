@@ -37,10 +37,16 @@ completion gate.
 | **Hardening:** Automatic issue-contract validation | No | No | No |
 | **Hardening:** Complete graph and routing test coverage | No | No | No |
 | **Hardening:** Complete side-effect intent and resume reconciliation | No | No | No |
-| **Hardening:** Reviewer independence enforcement | No | No | No |
-| **Hardening:** GitHub Actions independent validation | No | No | No |
+| **Hardening:** Final-review independence before READY | Yes | No | No |
+| **Hardening:** GitHub Actions polling and repair | Yes | No | No |
+| **Hardening:** Persistent task aggregate and guarded transitions | Yes | No | No |
+| **Hardening:** Prompt and issue task intake | Yes | No | No |
+| **Hardening:** Per-task Git worktrees | Yes | No | No |
+| **Hardening:** Queue status and resource limits | Yes | No | No |
+| **Hardening:** CI polling and bounded repair | Yes | No | No |
+| **Hardening:** Post-CI independent final review | Yes | No | No |
 | **Hardening:** Pluggable agent backends | No | No | No |
-| **Hardening:** Sequential `agent-ready` queue | No | No | No |
+| **Hardening:** `agent-ready` label polling | No | No | No |
 
 Definitions:
 
@@ -56,10 +62,9 @@ to be implemented and verified.
 
 Update this table only when implementation or verification evidence changes.
 
-Partial hardening already exists: focused tests cover the current conditional
-graph routes, and write-ahead reconciliation is implemented for remote branch
-push and draft-PR upsert. The corresponding rows remain `No` until the complete
-hardening scope listed below is implemented and verified.
+Focused tests cover current graph routes, remote push/PR reconciliation, task
+transitions, CI classification, final READY gates, and worktree setup. The
+table remains conservative: no full task lifecycle has been tested end to end.
 
 ## Priority 1 — Verify the supervised MVP
 
@@ -94,14 +99,15 @@ state for safe resume.
   successful pushes with missing confirmation, and PR upserts with missing
   metadata.
 - Verify failed-attempt artifact preservation and clean retry isolation.
-- Enforce fresh, read-only reviewer invocations without coder session history or
-  hidden reasoning.
+- Verify fresh, read-only reviewer invocations without coder session history or
+  hidden reasoning across both graph and post-CI review paths.
 - Record coder and reviewer backend, provider, and model identity in workflow
   state and pull-request evidence.
 - Require different coder and reviewer model identities before labeling an LLM
   result independent; otherwise label it secondary review.
 - Verify whole-plan repair and final history rewriting.
-- Add GitHub Actions as an independent PR validation gate.
+- Run repeated live verification for GitHub Actions polling, repair, and
+  final-review gating.
 - Keep PRs draft and retain human merge approval.
 
 ## Priority 3 — Improve diagnostics and recovery
@@ -124,15 +130,15 @@ state for safe resume.
   frameworks, modules, package roots, entry points, documentation, and
   validation commands.
 
-## Priority 5 — Add unattended queue execution
+## Priority 5 — Add automatic issue queue intake
 
-Add a sequential runner that:
+Extend explicit task submission with label polling that:
 
 - selects only issues labeled `agent-ready`
 - also requires a valid automatic issue contract
 - skips issues already running or represented by an open agent PR
 - applies `agent-running`, `agent-blocked`, or `agent-completed`
-- processes one issue at a time
+- uses the configured task, Codex, and build limits
 - limits issues, failures, and execution time per run
 - preserves blocked workspaces
 
@@ -160,5 +166,5 @@ routing tests, independent CI, and recovery behavior are verified.
 7. Verify retry isolation, whole-plan repair, and history rewriting.
 8. Introduce pluggable agent backends and prompt builders.
 9. Add structured repository metadata and operational telemetry.
-10. Add the sequential `agent-ready` queue.
+10. Add automatic `agent-ready` label polling.
 11. Add polling, webhooks, and optional parallelism.

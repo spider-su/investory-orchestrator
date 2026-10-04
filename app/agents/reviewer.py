@@ -237,11 +237,16 @@ def review_implementation(
 """
     ).strip()
 
+    task_reference = (
+        f"task {abs(issue_number)}"
+        if issue_number < 0
+        else f"GitHub issue #{issue_number}"
+    )
     prompt = f"""
 You are reviewing an implementation in the Investory repository.
 
-Issue:
-#{issue_number} — {issue_title}
+Task:
+{task_reference} — {issue_title}
 
 Issue body:
 {issue_body or "No issue body was provided."}

@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class CoderError(RuntimeError):
     pass
+
+
+class CoderReport(BaseModel):
+    status: Literal["completed", "needs_human_input"]
+    summary: str
+    changes: list[str] = Field(default_factory=list)
+    tests_run: list[str] = Field(default_factory=list, alias="testsRun")
+    remaining_problems: list[str] = Field(
+        default_factory=list,
+        alias="remainingProblems",
+    )
+    needs_human_input: bool = Field(alias="needsHumanInput")
 
 
 def _coder_environment() -> dict[str, str]:
@@ -81,9 +98,14 @@ def run_coder(
     attempt: int,
     max_attempts: int,
     failed_patch_path: str,
-) -> str:
+) -> CoderReport:
+    task_reference = (
+        f"task {abs(issue_number)}"
+        if issue_number < 0
+        else f"GitHub issue #{issue_number}"
+    )
     prompt = f"""
-Implement GitHub issue #{issue_number} in the current repository.
+Implement {task_reference} in the current repository.
 
 Title:
 {issue_title}
@@ -123,57 +145,85 @@ Instructions:
 - Do not commit, push, or create a pull request.
 - The orchestrator runs the complete validation suite separately.
 
-Return a concise implementation summary.
+Return a JSON object matching this contract:
+{{
+  "status": "completed" or "needs_human_input",
+  "summary": "concise implementation summary",
+  "changes": ["files or behavior changed"],
+  "testsRun": ["commands actually run by the coder, or an empty list"],
+  "remainingProblems": ["unresolved implementation problems"],
+  "needsHumanInput": false
+}}
+Use status `needs_human_input` and set `needsHumanInput` true only when a
+product decision or missing information prevents a safe implementation.
+Do not claim tests were run unless you ran them.
 """.strip()
 
-    command = [
-        "codex",
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "-",
-    ]
-
-    model = os.getenv("CODER_MODEL")
-    if model:
-        command.extend(["--model", model])
-
-    try:
-        result = subprocess.run(
-            command,
-            cwd=workspace,
-            env=_coder_environment(),
-            input=prompt,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=1800,
+    with tempfile.TemporaryDirectory(prefix="investory-coder-") as temp_dir:
+        schema_path = Path(temp_dir) / "coder-report.schema.json"
+        output_path = Path(temp_dir) / "coder-report.json"
+        schema = CoderReport.model_json_schema(by_alias=True)
+        schema["additionalProperties"] = False
+        schema["required"] = list(schema["properties"])
+        schema_path.write_text(
+            json.dumps(schema),
+            encoding="utf-8",
         )
-    except subprocess.TimeoutExpired as error:
-        output = error.stdout or ""
+        command = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(output_path),
+        ]
+        model = os.getenv("CODER_MODEL")
+        if model:
+            command.extend(["--model", model])
+        command.append("-")
 
-        if isinstance(output, bytes):
-            output = output.decode(
-                "utf-8",
-                errors="replace",
+        try:
+            result = subprocess.run(
+                command,
+                cwd=workspace,
+                env=_coder_environment(),
+                input=prompt,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=1800,
             )
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            raise CoderError(
+                f"Coder timed out after 1800 seconds.\n{output}"
+            ) from error
+        except OSError as error:
+            raise CoderError(
+                f"Could not start Codex CLI: {error}"
+            ) from error
 
-        raise CoderError(
-            "Coder timed out after 1800 seconds.\n"
-            f"{output}"
-        ) from error
-    except OSError as error:
-        raise CoderError(
-            f"Could not start Codex CLI: {error}"
-        ) from error
-
-    output = result.stdout or "(Codex produced no output)"
-
-    if result.returncode != 0:
-        raise CoderError(
-            f"Codex failed with exit code "
-            f"{result.returncode}:\n"
-            f"{output}"
-        )
-
-    return output
+        output = result.stdout or "(Codex produced no output)"
+        if result.returncode != 0:
+            raise CoderError(
+                f"Codex failed with exit code {result.returncode}:\n{output}"
+            )
+        if not output_path.is_file():
+            raise CoderError("Codex did not write its structured coder report.")
+        try:
+            report = CoderReport.model_validate_json(
+                output_path.read_text(encoding="utf-8")
+            )
+        except Exception as error:
+            raise CoderError(
+                f"Codex returned an invalid structured coder report: {error}"
+            ) from error
+        if report.needs_human_input != (report.status == "needs_human_input"):
+            raise CoderError(
+                "Coder report status and needsHumanInput must agree."
+            )
+        return report

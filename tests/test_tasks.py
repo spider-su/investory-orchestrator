@@ -3,7 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from app.task_scheduler import _run_final_review
 from app.tasks import TaskStatus, TaskStore
 
 
@@ -59,6 +62,100 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(
             [task.task_id for task in self.store.list({TaskStatus.QUEUED})],
             [queued.task_id],
+        )
+
+    def test_ready_requires_independent_review_and_other_quality_gates(self) -> None:
+        task = self._ready_for_final_review()
+        review = SimpleNamespace(
+            status="approved",
+            model_dump=lambda mode=None: {"status": "approved"},
+        )
+        with (
+            patch("app.agents.reviewer.review_implementation", return_value=review),
+            patch("app.agents.reviewer.review_identity", return_value={
+                "backend": "reviewer",
+                "provider": "openai",
+                "model": "review-model",
+            }),
+            patch("app.task_scheduler.subprocess.run", return_value=SimpleNamespace(stdout="")),
+        ):
+            _run_final_review(self.store, task)
+
+        self.assertEqual(self.store.get(task.task_id).status, TaskStatus.READY)
+
+    def test_ready_transition_rejects_missing_or_failed_ci(self) -> None:
+        task = self._ready_for_final_review()
+        metadata = {
+            **task.metadata,
+            "final_review_status": "approved",
+            "final_review_independence": "independent",
+            "ready_gates": {"clean_worktree": True},
+        }
+        for ci_status in ("not_started", "failed"):
+            with self.subTest(ci_status=ci_status):
+                with self.assertRaisesRegex(ValueError, "green CI"):
+                    self.store.transition(
+                        task.task_id,
+                        TaskStatus.READY,
+                        ci_status=ci_status,
+                        metadata=metadata,
+                    )
+
+    def test_same_model_review_cannot_mark_task_ready(self) -> None:
+        task = self._ready_for_final_review()
+        review = SimpleNamespace(
+            status="approved",
+            model_dump=lambda mode=None: {"status": "approved"},
+        )
+        with (
+            patch("app.agents.reviewer.review_implementation", return_value=review),
+            patch("app.agents.reviewer.review_identity", return_value={
+                "backend": "reviewer",
+                "provider": "openai",
+                "model": "coder-model",
+            }),
+            patch("app.task_scheduler.subprocess.run", return_value=SimpleNamespace(stdout="")),
+        ):
+            _run_final_review(self.store, task)
+
+        saved = self.store.get(task.task_id)
+        self.assertEqual(saved.status, TaskStatus.BLOCKED)
+        self.assertIn("not independent", saved.blocked_reason)
+
+    def _ready_for_final_review(self):
+        task = self.store.create(
+            issue_number=None,
+            title="Persist report",
+            body="Acceptance criteria",
+            source="github_issue",
+        )
+        for status in (
+            TaskStatus.PLANNING,
+            TaskStatus.IMPLEMENTING,
+            TaskStatus.VALIDATING,
+            TaskStatus.REVIEWING,
+            TaskStatus.PUBLISHING,
+            TaskStatus.WAITING_CI,
+            TaskStatus.FINAL_REVIEW,
+        ):
+            task = self.store.transition(task.task_id, status)
+        return self.store.transition(
+            task.task_id,
+            TaskStatus.FINAL_REVIEW,
+            workspace="/tmp/task-worktree",
+            pr_number=99,
+            pr_url="https://example.test/pr/99",
+            ci_status="green",
+            metadata={
+                "issue_number": 88,
+                "issue_title": "Persist report",
+                "issue_body": "Acceptance criteria",
+                "plan": {},
+                "final_validation_status": "validation_success",
+                "coder_provider": "openai",
+                "coder_model": "coder-model",
+                "ci_details": [],
+            },
         )
 
 

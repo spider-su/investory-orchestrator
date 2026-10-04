@@ -7,7 +7,12 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from app.agents.coder import CoderError, coder_identity, run_coder
+from app.agents.coder import (
+    CoderError,
+    CoderReport,
+    coder_identity,
+    run_coder,
+)
 from app.agents.planner import (
     PlannerError,
     create_plan,
@@ -52,6 +57,10 @@ from app.workspace import (
 
 
 def load_issue(state: WorkflowState) -> dict:
+    if state.get("task_source") == "prompt":
+        print(f"Loaded prompt task {state.get('task_id', '')}")
+        return {"error": ""}
+
     client = GitHubAppClient()
     issue = client.get_issue(state["issue_number"])
 
@@ -127,6 +136,8 @@ def planner_node(state: WorkflowState) -> dict:
 
 
 def prepare_plan_comment_node(state: WorkflowState) -> dict:
+    if state.get("task_source") == "prompt":
+        return {"side_effect_intent": {}, "plan_published": False}
     if (
         os.getenv("PUBLISH_PLAN_COMMENT", "true").lower()
         not in {"1", "true", "yes"}
@@ -164,6 +175,8 @@ def prepare_plan_comment_node(state: WorkflowState) -> dict:
 
 
 def publish_plan_node(state: WorkflowState) -> dict:
+    if state.get("task_source") == "prompt":
+        return {"plan_published": False}
     publish_enabled = (
         os.getenv("PUBLISH_PLAN_COMMENT", "true").lower()
         in {"1", "true", "yes"}
@@ -237,7 +250,12 @@ def route_after_plan_publication(
 def planning_failure_node(state: WorkflowState) -> dict:
     print("RESULT: PLANNING FAILURE")
     print(state["planning_error"])
-    return {}
+    return {
+        "workflow_status": "blocked",
+        "blocked_reason": state["planning_error"],
+        "blocked_stage": "planner",
+        "error": "",
+    }
 
 
 def awaiting_user_input_node(
@@ -274,6 +292,7 @@ def awaiting_user_input_node(
 def resume_from_for_stage(blocked_stage: str) -> str | None:
     return {
         "awaiting_user_input": "prepare_workspace",
+        "planner": "collect_repository_context",
         "environment": "prepare_workspace",
         "prepare_plan_comment": "prepare_plan_comment",
         "publish_plan": "publish_plan",
@@ -362,6 +381,7 @@ def prepare_workspace_node(state: WorkflowState) -> dict:
     workspace, branch = prepare_workspace(
         client,
         state["issue_number"],
+        task_id=state.get("task_id", "") if state.get("task_source") == "prompt" else "",
     )
 
     print(f"Workspace prepared: {workspace}")
@@ -498,6 +518,7 @@ def prepare_current_step_node(state: WorkflowState) -> dict:
         "attempt_artifacts": attempt_artifacts,
         "last_failed_patch_path": "",
         "coder_summary": "",
+        "coder_report": {},
         "coder_error": "",
         "validation_status": "not_started",
         "validation_exit_code": 0,
@@ -524,7 +545,7 @@ def coder_node(state: WorkflowState) -> dict:
     )
 
     try:
-        summary = run_coder(
+        coder_report = run_coder(
             workspace=Path(state["workspace"]),
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
@@ -578,6 +599,7 @@ def coder_node(state: WorkflowState) -> dict:
         return {
             "attempt": next_attempt if candidate_produced else state["attempt"],
             "coder_summary": "",
+            "coder_report": {},
             "coder_error": message,
             "coder_backend": coder_info["backend"],
             "coder_provider": coder_info["provider"],
@@ -589,6 +611,28 @@ def coder_node(state: WorkflowState) -> dict:
             "error": message,
         }
 
+    if isinstance(coder_report, str):
+        coder_report = CoderReport(
+            status="completed",
+            summary=coder_report,
+            needsHumanInput=False,
+        )
+    if coder_report.needs_human_input:
+        reason = "Coder needs human input: " + "; ".join(
+            coder_report.remaining_problems
+        )
+        return {
+            "workflow_status": "blocked",
+            "coder_summary": coder_report.summary,
+            "coder_report": coder_report.model_dump(mode="json", by_alias=True),
+            "coder_error": "",
+            "requires_user_input": True,
+            "blocked_reason": reason,
+            "blocked_stage": "awaiting_user_input",
+            "error": "",
+        }
+
+    summary = coder_report.summary
     print("Coder completed")
 
     return {
@@ -597,6 +641,7 @@ def coder_node(state: WorkflowState) -> dict:
         "review": {},
         "review_status": "not_started",
         "coder_summary": summary,
+        "coder_report": coder_report.model_dump(mode="json", by_alias=True),
         "coder_error": "",
         "coder_backend": coder_info["backend"],
         "coder_provider": coder_info["provider"],
@@ -607,7 +652,7 @@ def coder_node(state: WorkflowState) -> dict:
 
 
 def route_after_coder(state: WorkflowState) -> str:
-    if state["coder_error"]:
+    if state["coder_error"] or state.get("workflow_status") == "blocked":
         return "blocked"
 
     return "run_validation"
@@ -939,6 +984,8 @@ def reviewer_node(state: WorkflowState) -> dict:
 
 
 def prepare_review_comment_node(state: WorkflowState) -> dict:
+    if state.get("task_source") == "prompt":
+        return {"side_effect_intent": {}, "review_published": False}
     if (
         os.getenv("PUBLISH_REVIEW_COMMENT", "true").lower()
         not in {"1", "true", "yes"}
@@ -976,6 +1023,8 @@ def prepare_review_comment_node(state: WorkflowState) -> dict:
 
 
 def publish_review_node(state: WorkflowState) -> dict:
+    if state.get("task_source") == "prompt":
+        return {"review_published": False}
     publish_enabled = (
         os.getenv(
             "PUBLISH_REVIEW_COMMENT",
@@ -1207,6 +1256,8 @@ def prepare_final_review_node(state: WorkflowState) -> dict:
 def route_after_prepare_final_review(state: WorkflowState) -> str:
     if state["workflow_status"] == "blocked":
         return "blocked"
+    if state.get("ci_repair_requested", False):
+        return "final_integration_coder"
 
     return "final_validation"
 
@@ -1305,7 +1356,7 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
     }
 
     try:
-        summary = run_coder(
+        coder_report = run_coder(
             workspace=Path(state["workspace"]),
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
@@ -1361,11 +1412,34 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
             "error": message,
         }
 
+    if isinstance(coder_report, str):
+        coder_report = CoderReport(
+            status="completed",
+            summary=coder_report,
+            needsHumanInput=False,
+        )
+    if coder_report.needs_human_input:
+        reason = "Coder needs human input: " + "; ".join(
+            coder_report.remaining_problems
+        )
+        return {
+            "workflow_status": "blocked",
+            "coder_error": "",
+            "coder_summary": coder_report.summary,
+            "coder_report": coder_report.model_dump(mode="json", by_alias=True),
+            "requires_user_input": True,
+            "blocked_reason": reason,
+            "blocked_stage": "awaiting_user_input",
+            "error": "",
+        }
+
+    summary = coder_report.summary
     print("Whole-plan integration repair completed")
     return {
         "workflow_status": "implementing",
         "final_attempt": next_attempt,
         "coder_summary": summary,
+        "coder_report": coder_report.model_dump(mode="json", by_alias=True),
         "coder_error": "",
         "final_review_status": "not_started",
         "final_review": {},
@@ -1379,7 +1453,7 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
 def route_after_final_integration_coder(
     state: WorkflowState,
 ) -> str:
-    if state["coder_error"]:
+    if state["coder_error"] or state.get("workflow_status") == "blocked":
         return "blocked"
 
     return "final_validation"
@@ -1874,9 +1948,13 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
     try:
         client = GitHubAppClient()
 
-        title = (
-            f"Implement #{state['issue_number']}: {state['issue_title']}"
+        prompt_task = state.get("task_source") == "prompt"
+        title_prefix = (
+            f"Implement task {state.get('task_id', '')}"
+            if prompt_task
+            else f"Implement #{state['issue_number']}"
         )
+        title = f"{title_prefix}: {state['issue_title']}"
 
         completed_steps = "\n".join(
             f"- [x] {step['id']}: {step['title']}"
@@ -1884,8 +1962,13 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
             if step.get("status") == "completed"
         )
 
+        issue_reference = (
+            ""
+            if prompt_task
+            else f"Closes #{state['issue_number']}\n\n"
+        )
         body = (
-            f"Closes #{state['issue_number']}\n\n"
+            f"{issue_reference}"
             "## Summary\n\n"
             f"{state['plan'].get('summary', '')}\n\n"
             "## Completed steps\n\n"
@@ -1910,7 +1993,7 @@ def create_draft_pr_node(state: WorkflowState) -> dict:
                 title=title,
                 body=body,
                 head=state["branch"],
-                base="main",
+                base=os.getenv("BASE_BRANCH", "main"),
             )
             print(f"Created draft PR #{pull_request.number}")
         else:

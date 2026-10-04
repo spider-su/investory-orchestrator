@@ -277,6 +277,8 @@ def _stage_changed_paths(
 def prepare_workspace(
     client: GitHubAppClient,
     issue_number: int,
+    *,
+    task_id: str = "",
 ) -> tuple[Path, str]:
     root = Path(
         os.getenv(
@@ -285,8 +287,14 @@ def prepare_workspace(
         )
     )
 
-    workspace = root / f"issue-{issue_number}"
-    branch = f"agent/issue-{issue_number}"
+    workspace = root / (
+        f"task-{task_id}" if task_id else f"issue-{issue_number}"
+    )
+    branch = (
+        f"agent/task-{task_id}"
+        if task_id
+        else f"agent/issue-{issue_number}"
+    )
 
     if workspace.exists():
         _mark_safe_directory(workspace)
@@ -304,34 +312,56 @@ def prepare_workspace(
 
     environment = _git_environment(client.token)
     remote_branch_sha = client.get_branch_head_sha(branch)
-
-    clone_command = [
-        "git",
-        "clone",
-    ]
-
-    if remote_branch_sha:
-        clone_command.extend(["--branch", branch])
-
-    clone_command.extend(
-        [
-            f"https://github.com/{client.repository_name}.git",
-            str(workspace),
-        ]
+    repository_cache = (
+        root
+        / ".repositories"
+        / f"{client.repository_name.replace('/', '_')}.git"
     )
+    repository_cache.parent.mkdir(parents=True, exist_ok=True)
+    remote_url = f"https://github.com/{client.repository_name}.git"
 
+    if not repository_cache.exists():
+        _run(
+            ["git", "clone", "--bare", remote_url, str(repository_cache)],
+            env=environment,
+        )
+    else:
+        _mark_safe_directory(repository_cache)
+        _run(
+            ["git", "remote", "set-url", "origin", remote_url],
+            cwd=repository_cache,
+        )
+    _mark_safe_directory(repository_cache)
     _run(
-        clone_command,
+        [
+            "git",
+            "fetch",
+            "--prune",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+        cwd=repository_cache,
         env=environment,
     )
 
-    _mark_safe_directory(workspace)
-
-    if not remote_branch_sha:
+    if remote_branch_sha:
         _run(
-            ["git", "checkout", "-b", branch],
-            cwd=workspace,
+            ["git", "fetch", "origin", f"{branch}:refs/remotes/origin/{branch}"],
+            cwd=repository_cache,
+            env=environment,
         )
+        _run(
+            ["git", "worktree", "add", "-b", branch, str(workspace), f"refs/remotes/origin/{branch}"],
+            cwd=repository_cache,
+        )
+    else:
+        base_branch = os.getenv("BASE_BRANCH", "main")
+        _run(
+            ["git", "worktree", "add", "-b", branch, str(workspace), f"refs/remotes/origin/{base_branch}"],
+            cwd=repository_cache,
+        )
+
+    _mark_safe_directory(workspace)
 
     _configure_git_identity(workspace)
 
