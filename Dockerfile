@@ -7,6 +7,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        openssh-client \
         nodejs \
         npm \
     && install -m 0755 -d /etc/apt/keyrings \

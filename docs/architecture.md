@@ -36,9 +36,11 @@ task.
 
 Task states are `QUEUED`, `PLANNING`, `IMPLEMENTING`, `VALIDATING`,
 `REVIEWING`, `PUBLISHING`, `WAITING_CI`, `FINAL_REVIEW`, `READY`, `BLOCKED`,
-and `FAILED`. SQLite persists task records separately from LangGraph
-checkpoints. The queue claims a task in a transaction before launching its
-worker. Waiting for CI occupies no worker process. A stopped worker is
+and `FAILED`. SQLite persists local task records separately from LangGraph
+checkpoints, while the k3s POC stores both in PostgreSQL under the configured
+schema. The queue claims a task in a transaction before launching its worker.
+In the split deployment it dispatches the workflow process over SSH to devMac.
+Waiting for CI occupies no worker process. A stopped worker is
 reconciled against its checkpoint on the next queue pass; an interrupted coder
 with a dirty worktree remains blocked for inspection.
 

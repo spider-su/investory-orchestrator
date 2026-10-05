@@ -158,7 +158,10 @@ def run_cli(
     args = parser.parse_args(argv)
 
     task_store = (
-        TaskStore(os.getenv("TASK_DB", "/app/data/tasks.db"))
+        TaskStore(
+            os.getenv("DATABASE_URL")
+            or os.getenv("TASK_DB", "/app/data/tasks.db")
+        )
         if (
             args.submit_issue is not None
             or args.submit_task
@@ -173,12 +176,24 @@ def run_cli(
     if args.submit_issue is not None:
         from app.github_client import GitHubAppClient
 
+        repository = os.getenv("GITHUB_REPOSITORY", "spider-su/investory")
+        repository_config = task_store.get_repository(repository)
+        if repository_config and not repository_config["enabled"]:
+            raise RuntimeError(f"Repository is disabled in configuration: {repository}")
         issue = GitHubAppClient().get_issue(args.submit_issue)
         task = task_store.create(
             issue_number=issue.number,
             title=issue.title,
             body=issue.body or "",
             source="github_issue",
+            repository=repository,
+            metadata={
+                "base_branch": (
+                    repository_config["base_branch"]
+                    if repository_config
+                    else os.getenv("BASE_BRANCH", "develop")
+                )
+            },
         )
         print(f"Queued task {task.task_id}: {task.title}")
         return

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import errno
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time
@@ -195,6 +197,62 @@ def _print_task(task: Any) -> None:
                 )
 
 
+def _ssh_target() -> str:
+    return os.getenv("MAC_SSH_TARGET", "").strip()
+
+
+def _ssh_command(remote_args: list[str]) -> list[str]:
+    target = _ssh_target()
+    if not target or not re.fullmatch(r"[A-Za-z0-9_.@-]+", target):
+        raise RuntimeError("MAC_SSH_TARGET must be an SSH user and host")
+    identity = os.getenv("MAC_SSH_KEY_PATH", "/run/secrets/mac-runner-key")
+    known_hosts = os.getenv("MAC_SSH_KNOWN_HOSTS", "/run/secrets/mac-known-hosts")
+    return [
+        "ssh", "-T", "-i", identity,
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+        target, shlex.join(remote_args),
+    ]
+
+
+def _remote_worker_command(task: Any) -> list[str]:
+    issue_number = task.issue_number
+    if issue_number is None and task.status == TaskStatus.BLOCKED:
+        issue_number = -max(1, int(task.task_id, 16))
+    args = ["run", task.task_id, str(issue_number or "-")]
+    args.append(str(task.metadata.get("base_branch") or "-"))
+    resume = task.status == TaskStatus.BLOCKED
+    args.append("1" if resume else "0")
+    ci_repair = resume and (
+        task.ci_status == "failed"
+        or task.metadata.get("final_review_status") == "changes_required"
+    )
+    args.append("1" if ci_repair else "0")
+    return _ssh_command(args)
+
+
+def _remote_worker_is_running(task_id: str) -> bool:
+    try:
+        result = subprocess.run(
+            _ssh_command(["probe", task_id]),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode in {0, 1}:
+            return result.returncode == 0
+        print(
+            f"Unable to determine whether Mac worker {task_id} is active "
+            f"(SSH/probe exit {result.returncode}); holding its task claim."
+        )
+        return True
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
+        print(f"Unable to probe Mac worker {task_id}; holding its task claim.")
+        return True
+
+
 def run_queue(store: TaskStore, *, once: bool = False) -> None:
     """Run queued tasks, then poll CI for tasks whose worker has exited."""
     max_active = max(1, int(os.getenv("MAX_ACTIVE_TASKS", "3")))
@@ -216,6 +274,12 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
             if _pid_alive(pid):
                 live_worker_count += 1
                 continue
+            if (
+                active.metadata.get("worker_mode") == "mac_ssh"
+                and _remote_worker_is_running(active.task_id)
+            ):
+                live_worker_count += 1
+                continue
             store.transition(
                 active.task_id,
                 TaskStatus.BLOCKED,
@@ -223,22 +287,30 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                 blocked_reason="Worker stopped unexpectedly; recovering its saved checkpoint.",
                 metadata={**active.metadata, "recovery_pending": True},
             )
-        candidates = store.list({TaskStatus.QUEUED})
+        repositories = {
+            item["repository"]: item
+            for item in store.list_repositories()
+            if item["enabled"]
+        }
+        candidates = [
+            task for task in store.list({TaskStatus.QUEUED})
+            if task.repository in repositories
+        ]
         retry_limit = max(0, int(os.getenv("CI_RETRY_ATTEMPTS", "3")))
         candidates.extend(
             task for task in store.list({TaskStatus.BLOCKED})
-            if (
-                task.ci_status == "failed"
-                and task.ci_attempts <= retry_limit
-            ) or (
-                task.metadata.get("final_review_status") == "changes_required"
-                and task.metadata.get("final_review_repairs", 0) <= retry_limit
+            if task.repository in repositories and (
+                (
+                    task.ci_status == "failed"
+                    and task.ci_attempts <= retry_limit
+                ) or (
+                    task.metadata.get("final_review_status") == "changes_required"
+                    and task.metadata.get("final_review_repairs", 0) <= retry_limit
+                ) or (
+                    task.metadata.get("final_review_retryable", False)
+                    and task.metadata.get("final_review_attempts", 0) <= retry_limit
+                ) or task.metadata.get("recovery_pending", False)
             )
-            or (
-                task.metadata.get("final_review_retryable", False)
-                and task.metadata.get("final_review_attempts", 0) <= retry_limit
-            )
-            or task.metadata.get("recovery_pending", False)
         )
         for task in candidates:
             if len(running) + live_worker_count >= worker_limit:
@@ -259,30 +331,33 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                 )
             except RuntimeError:
                 continue
-            command = [
-                sys.executable,
-                "-m",
-                "app",
-                "--task-id",
-                task.task_id,
-            ]
-            if task.issue_number is not None:
-                command.extend(["--issue", str(task.issue_number)])
-            elif task.status == TaskStatus.BLOCKED:
-                command.extend(["--issue", str(-max(1, int(task.task_id, 16)))])
-            if task.status == TaskStatus.BLOCKED:
-                command.append("--resume")
-                if task.ci_status == "failed" or task.metadata.get(
-                    "final_review_status"
-                ) == "changes_required":
-                    command.append("--ci-repair")
             try:
+                remote_target = _ssh_target()
+                command = (
+                    _remote_worker_command(task)
+                    if remote_target
+                    else [sys.executable, "-m", "app", "--task-id", task.task_id]
+                )
+                if not remote_target:
+                    if task.issue_number is not None:
+                        command.extend(["--issue", str(task.issue_number)])
+                    elif task.status == TaskStatus.BLOCKED:
+                        command.extend(["--issue", str(-max(1, int(task.task_id, 16)))])
+                    if task.status == TaskStatus.BLOCKED:
+                        command.append("--resume")
+                        if task.ci_status == "failed" or task.metadata.get(
+                            "final_review_status"
+                        ) == "changes_required":
+                            command.append("--ci-repair")
+                worker_environment = os.environ.copy()
+                if task.metadata.get("base_branch") and not remote_target:
+                    worker_environment["BASE_BRANCH"] = task.metadata["base_branch"]
                 process = subprocess.Popen(
                     command,
-                    env=os.environ.copy(),
+                    env=worker_environment,
                     text=True,
                 )
-            except OSError as error:
+            except (OSError, RuntimeError) as error:
                 store.transition(
                     task.task_id,
                     TaskStatus.BLOCKED,
@@ -297,7 +372,11 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                 task.task_id,
                 current.status,
                 expected=current.status,
-                metadata={**current.metadata, "worker_pid": process.pid},
+                metadata={
+                    **current.metadata,
+                    "worker_pid": process.pid,
+                    "worker_mode": "mac_ssh" if remote_target else "local",
+                },
             )
             # At most one worker is started per scheduler iteration when the
             # build limit is one. The task remains durable if the process dies.
@@ -325,9 +404,56 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                         },
                     )
         _poll_ci(store)
+        _notify_terminal_tasks(store)
         if once:
             return
         time.sleep(float(os.getenv("QUEUE_POLL_SECONDS", "30")))
+
+
+def _notify_terminal_tasks(store: TaskStore) -> None:
+    repositories = {item["repository"]: item for item in store.list_repositories()}
+    candidates = store.list({TaskStatus.READY, TaskStatus.BLOCKED})
+    for task in candidates:
+        if task.issue_number is None:
+            continue
+        repository_config = repositories.get(task.repository, {})
+        login = repository_config.get("notification_login", "")
+        if not login:
+            continue
+        already_notified = task.metadata.get("terminal_notification_status")
+        if already_notified == task.status.value:
+            continue
+        mention = f"@{login} "
+        if task.status == TaskStatus.READY:
+            body = (
+                f"{mention}Investory Orchestrator is ready for human review.\n\n"
+                f"Draft PR: {task.pr_url}\n"
+                "CI is green and the final review passed. Please review and merge manually."
+            )
+        else:
+            body = (
+                f"{mention}Investory Orchestrator is blocked and needs attention.\n\n"
+                f"Reason: {task.blocked_reason or 'See task details.'}"
+            )
+        marker = "<!-- investory-orchestrator-terminal-notification -->"
+        try:
+            from app.github_client import GitHubAppClient
+
+            GitHubAppClient().upsert_issue_comment(
+                task.issue_number,
+                f"{marker}\n{body}",
+                marker=marker,
+            )
+            store.transition(
+                task.task_id,
+                task.status,
+                metadata={
+                    **task.metadata,
+                    "terminal_notification_status": task.status.value,
+                },
+            )
+        except (RuntimeError, ValueError, KeyError) as error:
+            print(f"Unable to notify for {task.task_id}: {error}")
 
 
 def _pid_alive(pid: Any) -> bool:

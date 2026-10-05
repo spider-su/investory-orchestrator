@@ -4,7 +4,7 @@ Investory Orchestrator turns queued GitHub issues or direct prompts into
 reviewed draft pull requests. Planner, coder, and reviewer roles run through
 the local Codex CLI; GitHub operations use a GitHub App. It coordinates
 deterministic validation, Git worktrees, GitHub Actions, repair loops, and a
-durable SQLite task queue.
+durable task queue backed by SQLite for local use or PostgreSQL for deployment.
 
 It does not merge pull requests automatically. Human review remains the final
 approval step.
@@ -18,6 +18,12 @@ remain unverified.
 
 [`ROADMAP.md`](ROADMAP.md) is the authoritative source for implementation,
 verification, and production-readiness status.
+
+The k3s scheduler, PostgreSQL, devMac SSH runner, dashboard, and deployment
+setup are documented in [`docs/k3s-poc.md`](docs/k3s-poc.md).
+
+The k3s scheduler, PostgreSQL, devMac SSH runner, dashboard, and deployment
+setup are documented in [`docs/k3s-poc.md`](docs/k3s-poc.md).
 
 ## What it does
 
@@ -61,7 +67,8 @@ docker compose run --rm orchestrator python -m app --list-tasks
 docker compose run --rm orchestrator python -m app --status <task-id>
 ```
 
-The SQLite task database and LangGraph checkpoints live under `./data`.
+By default, the SQLite task database and LangGraph checkpoints live under
+`./data`; set `DATABASE_URL` to use PostgreSQL for both.
 Each task receives `workspaces/task-<id>` or `workspaces/issue-<number>` and a
 separate branch. A shared bare repository cache under `workspaces/.repositories`
 backs linked Git worktrees. `--run-queue --once` runs one queue pass for
