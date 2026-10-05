@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -14,13 +15,20 @@ from app.tasks import TaskStore
 class DashboardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "DASHBOARD_API_TOKEN": "test-token",
+                "GITHUB_REPOSITORY": "spider-su/investory",
+            },
+        )
+        self.environment.start()
         self.store = TaskStore(Path(self.temp_dir.name) / "tasks.db")
-        os.environ["DASHBOARD_API_TOKEN"] = "test-token"
         self.client = TestClient(create_app(self.store))
         self.headers = {"Authorization": "Bearer test-token"}
 
     def tearDown(self) -> None:
-        os.environ.pop("DASHBOARD_API_TOKEN", None)
+        self.environment.stop()
         self.temp_dir.cleanup()
 
     def test_dashboard_health_is_public_but_data_requires_token(self) -> None:
