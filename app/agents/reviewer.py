@@ -219,9 +219,12 @@ def review_implementation(
 """
         if review_scope == "whole_plan"
         else """
-- Concentrate on the current implementation step and its acceptance criteria.
-- Treat earlier approved steps as context, while still reporting direct
-  regressions caused by the current candidate.
+- Evaluate the current step's goal, requirements, acceptance criteria,
+  validation, and affected areas.
+- Treat issue-level criteria and later planned steps as context. Do not report
+  work assigned to a later step as missing before that step is implemented.
+- Report direct regressions caused by the current candidate even when they
+  affect behavior from an earlier step.
 """
     ).strip()
 
@@ -254,10 +257,13 @@ Review scope:
 Review rules:
 {scope_rules}
 - Review only against the issue and approved plan.
-- Verify overall and step-level acceptance criteria.
+- Verify acceptance criteria for the active review scope. For a step review,
+  assess the current step only; for a whole-plan review, assess the issue and
+  all plan steps.
 - Check for missing behaviour, incorrect behaviour, unrelated changes,
   weakened tests, missing tests, and unsafe error handling.
-- Any unmet acceptance criterion requires the changes_required status.
+- Any unmet acceptance criterion within the active scope requires the
+  changes_required status.
 - Any blocking finding requires the changes_required status.
 - An implementation may still be approved if it has only warnings or
   suggestions.

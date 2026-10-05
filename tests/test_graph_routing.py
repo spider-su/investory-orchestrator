@@ -132,6 +132,16 @@ class GraphRoutingTests(unittest.TestCase):
     def test_route_after_step_completion(self) -> None:
         self.assertEqual(
             route_after_step_completion(
+                {
+                    "workflow_status": "blocked",
+                    "current_step": 0,
+                    "steps": [{"id": "step-1"}],
+                }
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            route_after_step_completion(
                 {"current_step": 0, "steps": [{"id": "step-1"}]}
             ),
             "prepare_current_step",
@@ -317,7 +327,7 @@ class GraphRoutingTests(unittest.TestCase):
             "cleanup",
         )
 
-    def test_push_resume_uses_saved_intent_without_repreparing(self) -> None:
+    def test_blocked_push_resume_retries_push_after_preparation(self) -> None:
         self.assertEqual(
             resolve_resume_from(
                 {
@@ -325,7 +335,7 @@ class GraphRoutingTests(unittest.TestCase):
                     "blocked_stage": "push_branch",
                 }
             ),
-            "push_branch",
+            "prepare_push_branch",
         )
 
     def test_coder_resume_preserves_attempt_state(self) -> None:
@@ -349,7 +359,7 @@ class GraphRoutingTests(unittest.TestCase):
                     },
                 }
             ),
-            "push_branch",
+            "prepare_push_branch",
         )
 
 

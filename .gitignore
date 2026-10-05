@@ -8,3 +8,4 @@ secrets/
 data/*.db
 workspaces/*
 !workspaces/.gitkeep
+/data/

@@ -311,7 +311,9 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "prepare_finalize_history": "prepare_finalize_history",
         "finalize_history": "finalize_history",
         "prepare_push_branch": "workflow_complete",
-        "push_branch": "push_branch",
+        # `update_state(..., as_node=...)` resumes after the named node, so
+        # anchor at preparation to execute the push node again.
+        "push_branch": "prepare_push_branch",
         "prepare_draft_pr": "push_branch",
         "create_draft_pr": "prepare_draft_pr",
         "cleanup": "cleanup",
@@ -339,7 +341,7 @@ def resolve_resume_from(state: dict) -> str:
             "issue_comment": intent.get("resume_node"),
             "checkpoint": "complete_step",
             "finalization": "finalize_history",
-            "push_branch": "push_branch",
+            "push_branch": "prepare_push_branch",
             "draft_pr_upsert": "prepare_draft_pr",
         }.get(intent.get("kind"))
 
@@ -1213,6 +1215,9 @@ def complete_step_node(state: WorkflowState) -> dict:
 
 
 def route_after_step_completion(state: WorkflowState) -> str:
+    if state.get("workflow_status") == "blocked":
+        return "blocked"
+
     if state["current_step"] >= len(state["steps"]):
         return "prepare_final_review"
 
@@ -1748,6 +1753,25 @@ def prepare_push_branch_node(state: WorkflowState) -> dict:
             )
 
         expected_remote_sha = client.get_branch_head_sha(state["branch"])
+        if expected_remote_sha == target_sha:
+            intent = prepare_push_intent(
+                issue_number=state["issue_number"],
+                branch=state["branch"],
+                target_sha=target_sha,
+                expected_remote_sha=expected_remote_sha,
+            )
+            print(
+                "Prepared reconciliation for already-pushed branch: "
+                f"{state['branch']}"
+            )
+            return {
+                "workflow_status": "publishing",
+                "side_effect_intent": intent,
+                "blocked_reason": "",
+                "blocked_stage": "",
+                "error": "",
+            }
+
         baseline_remote_sha = state["remote_baseline_sha"] or None
 
         if expected_remote_sha != baseline_remote_sha:
@@ -2328,6 +2352,7 @@ def build_graph():
         {
             "prepare_current_step": "prepare_current_step",
             "prepare_final_review": "prepare_final_review",
+            "blocked": "blocked",
         },
     )
 

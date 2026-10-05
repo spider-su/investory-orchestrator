@@ -62,6 +62,23 @@ class SideEffectReconciliationTests(unittest.TestCase):
         self.assertEqual(intent["target_sha"], "final-sha")
         self.assertEqual(intent["expected_remote_sha"], "old-sha")
 
+    def test_prepare_push_reconciles_branch_already_at_target(self) -> None:
+        state = base_state()
+        client = SimpleNamespace(
+            get_branch_head_sha=lambda branch: "final-sha"
+        )
+
+        with patch("app.graph.GitHubAppClient", return_value=client):
+            result = prepare_push_branch_node(state)
+
+        self.assertEqual(result["workflow_status"], "publishing")
+        self.assertEqual(
+            result["side_effect_intent"]["target_sha"], "final-sha"
+        )
+        self.assertEqual(
+            result["side_effect_intent"]["expected_remote_sha"], "final-sha"
+        )
+
     def test_push_reconciles_already_applied_operation(self) -> None:
         state = base_state()
         state["side_effect_intent"] = {

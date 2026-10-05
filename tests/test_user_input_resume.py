@@ -72,7 +72,13 @@ class UserInputResumeTests(unittest.TestCase):
 
         self.assertEqual(
             resolve_resume_from(state),
-            "push_branch",
+            "prepare_push_branch",
+        )
+
+    def test_blocked_push_resumes_before_the_push_node(self) -> None:
+        self.assertEqual(
+            resume_from_for_stage("push_branch"),
+            "prepare_push_branch",
         )
 
     def test_nonblocked_state_without_prepared_operation_cannot_resume(self) -> None:

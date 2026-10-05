@@ -1,8 +1,8 @@
 #:schema https://developers.openai.com/codex/config-schema.json
 
 # Strong default for implementation, debugging, and multi-file repository work.
-model = "gpt-5.6-terra"
-model_reasoning_effort = "high"
+model = "gpt-6-luna"
+model_reasoning_effort = "medium"
 
 # Use Luna explicitly for cheap, well-scoped work when needed:
 # codex -m gpt-5.6-luna

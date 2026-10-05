@@ -102,7 +102,7 @@ class ReviewerTests(unittest.TestCase):
             "independent",
         )
 
-    def _run_review(self, result):
+    def _run_review(self, result, *, review_scope="step"):
         with patch(
             "app.agents.reviewer.run_structured_prompt",
             return_value=result,
@@ -118,6 +118,7 @@ class ReviewerTests(unittest.TestCase):
                     issue_body="Cover planner, coder, and reviewer.",
                     plan={"step": "step-01"},
                     validation_output="Validation succeeded.",
+                    review_scope=review_scope,
                 )
         return review, run_mock
 
@@ -135,6 +136,18 @@ class ReviewerTests(unittest.TestCase):
         self.assertIn("#42 — Add tests for agents", kwargs["prompt"])
         self.assertIn("Validation succeeded.", kwargs["prompt"])
         self.assertIn("branch diff text", kwargs["prompt"])
+        self.assertIn("Do not report", kwargs["prompt"])
+        self.assertIn("later planned steps as context", kwargs["prompt"])
+
+    def test_whole_plan_review_covers_all_steps(self) -> None:
+        _, run_mock = self._run_review(
+            build_review(),
+            review_scope="whole_plan",
+        )
+
+        prompt = run_mock.call_args.kwargs["prompt"]
+        self.assertIn("Review the complete implementation across every plan step.", prompt)
+        self.assertIn("assess the issue and", prompt)
 
     def test_review_forces_changes_required_for_missing_requirements(self) -> None:
         review, _ = self._run_review(
