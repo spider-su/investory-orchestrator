@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: scheduler
-          image: ghcr.io/spider-su/investory-orchestrator:latest
+          image: aserobaba/orchestrator:latest
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "app", "--run-queue"]
           envFrom:
@@ -88,7 +88,7 @@ spec:
     spec:
       containers:
         - name: dashboard
-          image: ghcr.io/spider-su/investory-orchestrator:latest
+          image: aserobaba/orchestrator:latest
           imagePullPolicy: IfNotPresent
           command: ["python", "-m", "uvicorn", "app.dashboard:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
           envFrom:
