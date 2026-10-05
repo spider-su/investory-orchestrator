@@ -68,12 +68,33 @@ command as that Mac account before starting the scheduler.
 
 ## Build and deploy
 
-Build and push an image to a registry accessible to k3s, then replace the image
-tag in `k8s/deployment.yaml` with that immutable tag. For example:
+The `Docker Build and Publish` GitHub Actions workflow builds and pushes the
+image to Docker Hub as `aserobaba/orchestrator` after the `Agent PR validation`
+workflow succeeds on `main`. It publishes `latest` and a commit-specific
+`sha-<commit>` tag, scans the image, and uploads an SBOM. It can also be
+started manually after selecting a source branch.
+
+Configure the repository Actions secrets `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN`. The token must have permission to push to the
+`aserobaba/orchestrator` Docker Hub repository. Keep the image public for
+unauthenticated k3s pulls, or configure an image pull secret.
+
+The `ops-autopilot` GitOps repository owns the Helm chart and Argo CD
+registration for the development POC. Its dev deployment follows `latest`;
+publishing an image does not make Argo CD roll it out. Run the `Promote
+orchestrator development image` workflow in `ops-autopilot` with the
+commit-specific `sha-...` tag from the publish workflow. Review and merge the
+generated GitOps PR to deploy it. Production deployment requires a published
+immutable digest and reviewed GitOps promotion before it is registered.
+The application requires the runtime and SSH secrets described above before
+its pods can become ready.
+
+For a direct, temporary deployment, build and push an image to a registry
+accessible to k3s, then select that tag in `k8s/deployment.yaml`:
 
 ```sh
 docker buildx build --platform linux/amd64 \
-  -t ghcr.io/spider-su/investory-orchestrator:<version> --push .
+  -t aserobaba/orchestrator:<version> --push .
 kubectl apply -k k8s/
 kubectl -n investory-orchestrator rollout status deployment/orchestrator-scheduler
 kubectl -n investory-orchestrator rollout status deployment/orchestrator-dashboard
