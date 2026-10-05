@@ -4,3 +4,7 @@ PyGithub
 cryptography
 python-dotenv
 pydantic
+fastapi
+uvicorn
+psycopg[binary]
+langgraph-checkpoint-postgres

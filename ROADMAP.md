@@ -47,6 +47,11 @@ completion gate.
 | **Hardening:** Post-CI independent final review | Yes | No | No |
 | **Hardening:** Pluggable agent backends | No | No | No |
 | **Hardening:** `agent-ready` label polling | No | No | No |
+| **POC:** PostgreSQL-backed tasks and LangGraph checkpoints | Yes | No | No |
+| **POC:** Repository configuration CRUD and task dashboard | Yes | No | No |
+| **POC:** k3s scheduler to devMac SSH worker dispatch | Yes | No | No |
+| **POC:** READY/BLOCKED GitHub issue mention | Yes | No | No |
+| **POC:** GitHub Projects tracking and priority synchronization | No | No | No |
 
 Definitions:
 
@@ -168,3 +173,12 @@ routing tests, independent CI, and recovery behavior are verified.
 9. Add structured repository metadata and operational telemetry.
 10. Add automatic `agent-ready` label polling.
 11. Add polling, webhooks, and optional parallelism.
+
+## POC — k3s scheduler and devMac execution
+
+Initial implementation exists in `k8s/`, `app/dashboard.py`, and the Mac
+worker dispatch path. It is not deployment-verified. Follow
+[`docs/k3s-poc.md`](docs/k3s-poc.md) to provision credentials, publish an
+immutable image, deploy, and run the first issue. GitHub Projects discovery
+and priority synchronization remain blocked on access to the selected project
+and its priority field.

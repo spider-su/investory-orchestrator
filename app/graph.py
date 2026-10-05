@@ -2474,24 +2474,52 @@ def build_graph():
     builder.add_edge("blocked", "cleanup")
     builder.add_edge("cleanup", END)
 
-    checkpoint_path = Path(
-        os.getenv(
-            "CHECKPOINT_DB",
-            "/app/data/checkpoints.db",
-        )
-    )
-    checkpoint_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    database_url = os.getenv("DATABASE_URL", "")
+    if database_url:
+        import re
 
-    connection = sqlite3.connect(
-        checkpoint_path,
-        check_same_thread=False,
-    )
+        os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
+        import psycopg
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+
+        schema = os.getenv("ORCHESTRATOR_SCHEMA", "investory_orchestrator")
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", schema):
+            raise ValueError(
+                "ORCHESTRATOR_SCHEMA must be a simple SQL identifier"
+            )
+        with psycopg.connect(database_url) as setup_connection:
+            setup_connection.execute(
+                f'CREATE SCHEMA IF NOT EXISTS "{schema}"'
+            )
+        connection = psycopg.connect(
+            database_url,
+            autocommit=True,
+            options=f"-c search_path={schema}",
+            row_factory=dict_row,
+        )
+        checkpointer = PostgresSaver(connection)
+        checkpointer.setup()
+    else:
+        checkpoint_path = Path(
+            os.getenv(
+                "CHECKPOINT_DB",
+                "/app/data/checkpoints.db",
+            )
+        )
+        checkpoint_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        connection = sqlite3.connect(
+            checkpoint_path,
+            check_same_thread=False,
+        )
+        checkpointer = SqliteSaver(connection)
 
     return builder.compile(
-        checkpointer=SqliteSaver(connection)
+        checkpointer=checkpointer
     )
 
 

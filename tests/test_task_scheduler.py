@@ -7,7 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.task_scheduler import _poll_ci, _sync_task_result, run_queue
+from app.task_scheduler import (
+    _poll_ci,
+    _notify_terminal_tasks,
+    _remote_worker_command,
+    _remote_worker_is_running,
+    _sync_task_result,
+    run_queue,
+)
 from app.tasks import TaskStatus, TaskStore
 
 
@@ -18,6 +25,62 @@ class TaskSchedulerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_remote_worker_command_uses_quoted_configured_mac_paths(self) -> None:
+        task = self.store.create(title="remote", issue_number=42)
+        with patch.dict(
+            os.environ,
+            {
+                "MAC_SSH_TARGET": "codex@192.168.1.7",
+                "MAC_SSH_KEY_PATH": "/run/secrets/mac-key",
+                "MAC_SSH_KNOWN_HOSTS": "/run/secrets/known-hosts",
+            },
+            clear=False,
+        ):
+            command = _remote_worker_command(task)
+        self.assertEqual(command[0], "ssh")
+        self.assertIn("StrictHostKeyChecking=yes", command)
+        self.assertIn("codex@192.168.1.7", command)
+        self.assertEqual(command[-1], "run 42 42 - 0 0")
+
+    def test_remote_worker_rejects_invalid_ssh_target(self) -> None:
+        task = self.store.create(title="remote", issue_number=43)
+        with patch.dict(
+            os.environ,
+            {"MAC_SSH_TARGET": "-oProxyCommand=bad"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "SSH user and host"):
+                _remote_worker_command(task)
+
+    def test_remote_probe_fails_closed_on_ssh_error(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MAC_SSH_TARGET": "codex@192.168.1.7",
+                },
+                clear=False,
+            ),
+            patch("app.task_scheduler.subprocess.run", return_value=SimpleNamespace(returncode=255)),
+        ):
+            self.assertTrue(_remote_worker_is_running("spider-su/investory#42"))
+
+    def test_blocked_issue_gets_one_stable_github_mention(self) -> None:
+        task = self.store.create(title="blocked", issue_number=44)
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        self.store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED,
+            blocked_reason="Needs a human decision",
+        )
+        with patch("app.github_client.GitHubAppClient") as client_type:
+            _notify_terminal_tasks(self.store)
+            _notify_terminal_tasks(self.store)
+        client_type.return_value.upsert_issue_comment.assert_called_once()
+        body = client_type.return_value.upsert_issue_comment.call_args.args[1]
+        self.assertIn("@spider-su", body)
+        self.assertIn("Needs a human decision", body)
 
     def test_queue_obeys_build_limit(self) -> None:
         first = self.store.create(title="first")

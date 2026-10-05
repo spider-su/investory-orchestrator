@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-scheduler
+  namespace: investory-orchestrator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orchestrator-scheduler
+  template:
+    metadata:
+      labels:
+        app: orchestrator-scheduler
+    spec:
+      containers:
+        - name: scheduler
+          image: ghcr.io/spider-su/investory-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app", "--run-queue"]
+          envFrom:
+            - configMapRef:
+                name: orchestrator-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-runtime
+                  key: database-url
+            - name: GITHUB_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-runtime
+                  key: github-installation-id
+          volumeMounts:
+            - name: mac-runner
+              mountPath: /run/secrets/mac-runner
+              readOnly: true
+            - name: github-app-key
+              mountPath: /run/secrets/github-app
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import os; os.kill(1, 0)"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: mac-runner
+          secret:
+            secretName: mac-runner-ssh
+            defaultMode: 0400
+            items:
+              - key: id_ed25519
+                path: id_ed25519
+              - key: known_hosts
+                path: known_hosts
+        - name: github-app-key
+          secret:
+            secretName: orchestrator-runtime
+            defaultMode: 0400
+            items:
+              - key: github-app-private-key
+                path: app.pem
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-dashboard
+  namespace: investory-orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator-dashboard
+  template:
+    metadata:
+      labels:
+        app: orchestrator-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: ghcr.io/spider-su/investory-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "uvicorn", "app.dashboard:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+          envFrom:
+            - configMapRef:
+                name: orchestrator-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-runtime
+                  key: database-url
+            - name: DASHBOARD_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-runtime
+                  key: dashboard-api-token
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-dashboard
+  namespace: investory-orchestrator
+spec:
+  selector:
+    app: orchestrator-dashboard
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
