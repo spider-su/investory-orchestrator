@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import os
 import re
+import shutil
 import shlex
 import subprocess
 import sys
@@ -28,6 +29,33 @@ def _task_id(value: str) -> str:
     if not TASK_ID_PATTERN.fullmatch(value):
         raise ValueError("invalid task id")
     return value
+
+
+def _ensure_node_on_path(environment: dict[str, str]) -> None:
+    if shutil.which("node", path=environment.get("PATH")):
+        return
+
+    nvm_script = Path.home() / ".nvm" / "nvm.sh"
+    if not nvm_script.is_file():
+        return
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", '. "$HOME/.nvm/nvm.sh" && nvm which default'],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    node_path = result.stdout.strip()
+    if result.returncode != 0 or not node_path:
+        raise RuntimeError(
+            "Could not resolve the default Node.js binary from NVM: "
+            f"{result.stderr.strip()}"
+        )
+
+    environment["PATH"] = os.pathsep.join(
+        [str(Path(node_path).parent), environment.get("PATH", "")]
+    )
 
 
 def _probe(task_id: str) -> int:
@@ -71,6 +99,21 @@ def _run(arguments: list[str]) -> int:
         environment = os.environ.copy()
         if base_branch != "-":
             environment["BASE_BRANCH"] = base_branch
+        _ensure_node_on_path(environment)
+        workspaces_dir = Path(
+            os.getenv(
+                "MAC_WORKSPACES_DIR",
+                "~/.investory-orchestrator/task-workspaces",
+            )
+        ).expanduser()
+        environment["WORKSPACES_DIR"] = str(workspaces_dir)
+        runs_dir = Path(
+            os.getenv(
+                "MAC_RUNS_DIR",
+                "~/.investory-orchestrator/runs",
+            )
+        ).expanduser()
+        environment["RUNS_DIR"] = str(runs_dir)
         return subprocess.call(command, cwd=Path(__file__).resolve().parents[1], env=environment)
 
 

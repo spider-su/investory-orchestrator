@@ -346,22 +346,53 @@ def prepare_workspace(
 
     if remote_branch_sha:
         _run(
-            ["git", "fetch", "origin", f"{branch}:refs/remotes/origin/{branch}"],
+            [
+                "git",
+                "fetch",
+                "origin",
+                f"refs/heads/{branch}:refs/remotes/origin/{branch}",
+            ],
             cwd=repository_cache,
             env=environment,
         )
-        _run(
-            ["git", "worktree", "add", "-b", branch, str(workspace), f"refs/remotes/origin/{branch}"],
-            cwd=repository_cache,
-        )
-    else:
-        base_branch = os.getenv("BASE_BRANCH", "main")
-        _run(
-            ["git", "worktree", "add", "-b", branch, str(workspace), f"refs/remotes/origin/{base_branch}"],
-            cwd=repository_cache,
-        )
 
+    base_branch = os.getenv("BASE_BRANCH", "main")
+    source_branch = branch if remote_branch_sha else base_branch
+    _run(
+        [
+            "git",
+            "clone",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(repository_cache),
+            str(workspace),
+        ],
+        env=environment,
+    )
     _mark_safe_directory(workspace)
+    _run(
+        [
+            "git",
+            "fetch",
+            str(repository_cache),
+            f"refs/remotes/origin/{source_branch}:refs/remotes/origin/{source_branch}",
+        ],
+        cwd=workspace,
+    )
+    _run(
+        [
+            "git",
+            "checkout",
+            "-b",
+            branch,
+            f"refs/remotes/origin/{source_branch}",
+        ],
+        cwd=workspace,
+    )
+    _run(
+        ["git", "remote", "set-url", "origin", remote_url],
+        cwd=workspace,
+    )
 
     _configure_git_identity(workspace)
 

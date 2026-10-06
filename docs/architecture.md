@@ -50,9 +50,10 @@ validated report with status, changes, tests run, remaining problems, and
 whether human input is needed; reviewers return a verdict and findings.
 Validation remains deterministic command execution through `TargetAdapter`.
 
-Each issue or prompt task gets a branch and a linked Git worktree. A shared
-bare clone is cached under the workspaces directory so worktrees remain
-separate without cloning the full repository for every task. Direct prompt
+Each issue or prompt task gets a branch and an independent local clone. A
+shared bare clone is cached under the workspaces directory, then the selected
+branch is copied into each workspace so its `.git` metadata stays inside the
+directory mounted into a Dev Container. Direct prompt
 tasks use the configured target repository and do not publish issue comments.
 
 The workflow is supervised. The operator currently owns issue-readiness

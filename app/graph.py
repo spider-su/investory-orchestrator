@@ -294,7 +294,7 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
     return {
         "awaiting_user_input": "prepare_workspace",
         "planner": "collect_repository_context",
-        "environment": "prepare_workspace",
+        "environment": "load_issue",
         "prepare_plan_comment": "prepare_plan_comment",
         "publish_plan": "publish_plan",
         # Set the checkpoint as if preparation completed so LangGraph's next
@@ -316,7 +316,9 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "push_branch": "prepare_push_branch",
         "prepare_draft_pr": "push_branch",
         "create_draft_pr": "prepare_draft_pr",
-        "cleanup": "cleanup",
+        # update_state resumes after the named node, so anchor at `blocked`
+        # to execute cleanup again instead of skipping directly to END.
+        "cleanup": "blocked",
     }.get(blocked_stage)
 
 

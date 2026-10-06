@@ -95,7 +95,7 @@ class WorkspaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict("os.environ", {"WORKSPACES_DIR": directory}):
-                with patch("app.workspace._run") as run_mock:
+                with patch("app.workspace._run", return_value="") as run_mock:
                     with patch("app.workspace._mark_safe_directory"):
                         with patch("app.workspace._configure_git_identity"):
                             workspace, branch = prepare_workspace(client, 42)
@@ -115,14 +115,36 @@ class WorkspaceTests(unittest.TestCase):
         run_mock.assert_any_call(
             [
                 "git",
-                "worktree",
-                "add",
+                "clone",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(Path(directory) / ".repositories" / "owner_repository.git"),
+                str(Path(directory) / "issue-42"),
+            ],
+            env=ANY,
+        )
+        run_mock.assert_any_call(
+            [
+                "git",
+                "fetch",
+                str(Path(directory) / ".repositories" / "owner_repository.git"),
+                "refs/remotes/origin/agent/issue-42:refs/remotes/origin/agent/issue-42",
+            ],
+            cwd=Path(directory) / "issue-42",
+        )
+        run_mock.assert_any_call(
+            [
+                "git",
+                "checkout",
                 "-b",
                 "agent/issue-42",
-                str(Path(directory) / "issue-42"),
                 "refs/remotes/origin/agent/issue-42",
             ],
-            cwd=Path(directory) / ".repositories" / "owner_repository.git",
+            cwd=Path(directory) / "issue-42",
+        )
+        run_mock.assert_any_call(
+            ["git", "remote", "set-url", "origin", "https://github.com/owner/repository.git"],
+            cwd=Path(directory) / "issue-42",
         )
 
     def test_prompt_task_uses_task_workspace_and_branch(self) -> None:
@@ -150,14 +172,32 @@ class WorkspaceTests(unittest.TestCase):
         run_mock.assert_any_call(
             [
                 "git",
-                "worktree",
-                "add",
+                "clone",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(Path(directory) / ".repositories" / "owner_repository.git"),
+                str(Path(directory) / "task-abc123"),
+            ],
+            env=ANY,
+        )
+        run_mock.assert_any_call(
+            [
+                "git",
+                "fetch",
+                str(Path(directory) / ".repositories" / "owner_repository.git"),
+                "refs/remotes/origin/develop:refs/remotes/origin/develop",
+            ],
+            cwd=Path(directory) / "task-abc123",
+        )
+        run_mock.assert_any_call(
+            [
+                "git",
+                "checkout",
                 "-b",
                 "agent/task-abc123",
-                str(Path(directory) / "task-abc123"),
                 "refs/remotes/origin/develop",
             ],
-            cwd=Path(directory) / ".repositories" / "owner_repository.git",
+            cwd=Path(directory) / "task-abc123",
         )
 
         with patch(

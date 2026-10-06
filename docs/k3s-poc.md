@@ -9,7 +9,7 @@
   `investory_orchestrator` schema.
 - The scheduler claims work in PostgreSQL and starts a bounded SSH command on
   devMac. The Mac checkout runs the existing workflow graph and local Codex
-  CLI, with its worktrees, Dev Containers, Git operations, and GitHub App
+  CLI, with its isolated Git checkouts, Dev Containers, Git operations, and GitHub App
   credentials remaining on the Mac.
 - A per-task file lock on devMac prevents duplicate execution. On scheduler
   restart, it probes that lock over SSH before recovering an active task.
@@ -60,9 +60,18 @@ container image, install its requirements in the configured virtualenv, and
 set its `.env` to use that PostgreSQL DSN, local authenticated Codex home,
 GitHub App credentials, `MAC_CLI_PYTHON` pointing to the checkout's virtualenv
 Python, `GITHUB_REPOSITORY=spider-su/investory`, and `BASE_BRANCH=develop`.
+The forced SSH entrypoint stores task workspaces under
+`~/.investory-orchestrator/task-workspaces` by default, independent of container
+paths passed in the SSH environment. Set `MAC_WORKSPACES_DIR` in the Mac
+runner environment to choose another writable location.
+Failed-attempt patch files are stored under
+`~/.investory-orchestrator/runs` by default; override this with
+`MAC_RUNS_DIR` when configuring the Mac runner.
 Ensure the same `.env` sets `GITHUB_PRIVATE_KEY_PATH` to the key on devMac and
-that the Codex executable is available in the non-interactive SSH `PATH` (the
-entrypoint adds `/Users/alex/.local/bin`).
+that the Codex and Node executables are available in the non-interactive SSH
+`PATH` (the entrypoint adds `/Users/alex/.local/bin` and selects the default
+NVM Node version when NVM is installed). The Mac also needs Docker Compose v2
+available as the `docker compose` CLI plugin for target scripts that use it.
 Verify `scripts/mac-ssh-entrypoint.sh` is executable and test the forced SSH
 command as that Mac account before starting the scheduler.
 
