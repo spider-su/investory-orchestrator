@@ -1,3 +1,18 @@
+FROM golang:1.26.8-bookworm AS buildx-builder
+
+ARG BUILDX_VERSION=v0.37.2
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch "${BUILDX_VERSION}" https://github.com/docker/buildx.git /src
+WORKDIR /src
+RUN go mod edit -replace=github.com/moby/go-archive=github.com/moby/go-archive@v0.3.3 \
+    && CGO_ENABLED=0 go build -mod=mod -trimpath \
+            -ldflags "-s -w -X github.com/docker/buildx/version.Version=${BUILDX_VERSION}" \
+            -o /out/docker-buildx ./cmd/buildx
+
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -21,8 +36,8 @@ RUN apt-get update \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         docker-ce-cli \
-        docker-buildx-plugin \
         docker-compose-plugin \
+        libpcre2-8-0 \
     && npm install -g \
         @devcontainers/cli \
         @openai/codex \
@@ -36,8 +51,19 @@ RUN apt-get update \
     && codex --version \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=buildx-builder /out/docker-buildx /usr/libexec/docker/cli-plugins/docker-buildx
+RUN chmod 0755 /usr/libexec/docker/cli-plugins/docker-buildx \
+    && docker buildx version
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade 'pip' \
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && rm -rf \
+        /usr/local/lib/python3.13/site-packages/pip \
+        /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.13
 
 COPY . .
 COPY scripts/orchestrator-entrypoint.sh /usr/local/bin/orchestrator-entrypoint
