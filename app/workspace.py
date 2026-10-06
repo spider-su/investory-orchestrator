@@ -60,6 +60,27 @@ def capture_workspace_audit(workspace: Path) -> dict[str, object]:
     }
 
 
+def concrete_affected_paths(
+    workspace: Path,
+    affected_areas: Iterable[str],
+) -> list[str] | None:
+    """Return machine-checkable plan paths, ignoring narrative descriptions."""
+    paths: list[str] = []
+    for area in affected_areas:
+        value = str(area).strip().strip("`").rstrip("/")
+        if not value:
+            continue
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            continue
+        if (workspace / path).exists() or (
+            not any(character.isspace() for character in value)
+            and ("/" in value or path.suffix)
+        ):
+            paths.append(path.as_posix())
+    return paths or None
+
+
 def _git_environment(token: str) -> dict[str, str]:
     environment = os.environ.copy()
 

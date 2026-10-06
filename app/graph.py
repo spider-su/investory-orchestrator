@@ -52,6 +52,7 @@ from app.test_runner import (
 from app.workspace import (
     capture_workspace_audit,
     commit_step,
+    concrete_affected_paths,
     finalize_checkpoint_history,
     prepare_workspace,
     push_branch,
@@ -306,7 +307,7 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "prepare_review_comment": "prepare_review_comment",
         "publish_review": "publish_review",
         "prepare_checkpoint": "prepare_checkpoint",
-        "complete_step": "complete_step",
+        "complete_step": "prepare_checkpoint",
         "prepare_final_review": "complete_step",
         "final_integration_coder": "prepare_final_review",
         "final_reviewer": "final_validation",
@@ -1193,6 +1194,15 @@ def complete_step_node(state: WorkflowState) -> dict:
         }
 
     try:
+        allowed_paths = concrete_affected_paths(
+            Path(state["workspace"]),
+            step.get("affected_areas", []),
+        )
+        if not allowed_paths:
+            print(
+                "Plan affected areas are descriptive; review findings will "
+                "enforce the step's file scope."
+            )
         commit_sha = commit_step(
             Path(state["workspace"]),
             step["id"],
@@ -1203,7 +1213,7 @@ def complete_step_node(state: WorkflowState) -> dict:
                 or None
             ),
             operation_id=intent.get("operation_id"),
-            allowed_paths=step.get("affected_areas", []),
+            allowed_paths=allowed_paths,
         )
     except RuntimeError as error:
         message = str(error)

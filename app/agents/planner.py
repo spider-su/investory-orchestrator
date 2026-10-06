@@ -107,6 +107,9 @@ Planning rules:
   unchanged and identify the evidence to report.
 - Every step must have concrete acceptance criteria.
 - Every step must specify how it will be validated.
+- List exact repository-relative files or directories in affected areas; do
+  not use narrative labels as if they were filesystem paths. Use an empty list
+  when affected paths cannot yet be named.
 - Do not include branch creation, commits, pushes, or pull requests as steps.
 - Do not include enhancements outside the issue scope.
 - Order steps according to dependencies.

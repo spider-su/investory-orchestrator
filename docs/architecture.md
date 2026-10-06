@@ -110,6 +110,11 @@ For each normalized plan step:
 Later steps must not be implemented early. Step progression happens only after
 approval of the current step.
 
+When a plan lists concrete repository-relative paths, the checkpoint commit
+enforces that path scope. Narrative descriptions are not treated as paths; the
+reviewer enforces scope for those steps. If checkpoint creation is interrupted,
+resume retries the commit node without skipping it or re-running the coder.
+
 ## Retry semantics
 
 `MAX_ATTEMPTS` is a per-step limit shared by validation and review repair loops.

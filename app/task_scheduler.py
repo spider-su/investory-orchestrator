@@ -40,6 +40,12 @@ def _track_task_state(
     task = store.get(task_id)
     if task is None:
         return
+    if status != TaskStatus.BLOCKED:
+        updates.setdefault("blocked_reason", "")
+        metadata = dict(updates.get("metadata", task.metadata))
+        if "blocked_stage" in metadata:
+            metadata.pop("blocked_stage", None)
+            updates["metadata"] = metadata
     for counter in ("implementation_attempts", "validation_attempts", "ci_attempts"):
         if counter in updates:
             updates[counter] = max(getattr(task, counter), updates[counter])
@@ -139,7 +145,11 @@ def _print_task(task: Any) -> None:
     print(
         f"{task.task_id}\t{task.status.value}\t{task.title}\t"
         f"PR {task.pr_number or '-'}\tCI {task.ci_status}"
-        + (f"\t{task.blocked_reason}" if task.blocked_reason else "")
+        + (
+            f"\t{task.blocked_reason}"
+            if task.status == TaskStatus.BLOCKED and task.blocked_reason
+            else ""
+        )
     )
     if task.status == TaskStatus.READY:
         metadata = task.metadata

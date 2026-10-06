@@ -384,6 +384,17 @@ class GraphRoutingTests(unittest.TestCase):
             "prepare_push_branch",
         )
 
+    def test_checkpoint_commit_resume_retries_the_commit_node(self) -> None:
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "blocked",
+                    "blocked_stage": "complete_step",
+                }
+            ),
+            "prepare_checkpoint",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

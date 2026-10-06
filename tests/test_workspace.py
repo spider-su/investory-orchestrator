@@ -11,11 +11,31 @@ from app.workspace import (
     capture_workspace_audit,
     _validate_existing_workspace,
     commit_step,
+    concrete_affected_paths,
     prepare_workspace,
 )
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_concrete_affected_paths_ignores_narrative_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "README.md").write_text("docs\n", encoding="utf-8")
+
+            self.assertIsNone(
+                concrete_affected_paths(
+                    workspace,
+                    ["Only documentation files implicated by step-01 findings"],
+                )
+            )
+            self.assertEqual(
+                concrete_affected_paths(
+                    workspace,
+                    ["README.md", "docs/security.md"],
+                ),
+                ["README.md", "docs/security.md"],
+            )
+
     def test_workspace_audit_captures_initial_git_state(self) -> None:
         workspace = Path("/tmp/issue-104")
         with patch(
