@@ -36,6 +36,12 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/tasks").status_code, 401)
         self.assertEqual(self.client.get("/api/tasks", headers=self.headers).json(), [])
 
+    def test_dashboard_api_requests_keep_the_ingress_path_prefix(self) -> None:
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("location.pathname.replace(/\\/+$/,'')", response.text)
+        self.assertIn("fetch(apiPrefix+path", response.text)
+
     def test_repository_crud_task_events_and_stats(self) -> None:
         response = self.client.put(
             "/api/repositories",
