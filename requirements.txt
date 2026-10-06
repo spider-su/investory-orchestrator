@@ -8,3 +8,6 @@ fastapi
 uvicorn
 psycopg[binary]
 langgraph-checkpoint-postgres
+msgpack>=1.2.1
+setuptools>=78.1.1
+urllib3>=2.8.0
