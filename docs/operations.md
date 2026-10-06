@@ -68,6 +68,7 @@ python -m app --run-queue
 python -m app --run-queue --once
 python -m app --list-tasks
 python -m app --status <task-id>
+python -m app --reconcile-merged-pr '<task-id>'
 ```
 
 `TASK_DB` must be on persistent storage. Compose mounts `./data` for task
@@ -77,6 +78,16 @@ limits. A task in `WAITING_CI` has no active worker. The scheduler polls GitHub
 Actions and commit statuses, starts bounded CI/final-review repair, and marks a
 task `READY` only after all required checks pass. `--once` is intended for
 supervised runs; omit it for continuous polling.
+
+In the split k3s/Mac deployment, final review is sent to the Mac runner over
+SSH. The runner checks that its workspace is clean and that its branch and
+HEAD match the open PR before it starts the read-only review. After a human
+merges a READY PR, the scheduler waits for successful checks on the merge
+commit, records the merge evidence, and closes the linked issue. To reconcile a
+merge made before the scheduler observed it, run
+`python -m app --reconcile-merged-pr '<task-id>'`; this requires a linked issue,
+the configured base branch, a recorded GitHub merge actor, and successful
+post-merge CI.
 
 Final review qualification requires known, different coder and reviewer model
 IDs. Set `CODER_MODEL` and `REVIEWER_MODEL` to different, explicit model IDs

@@ -15,6 +15,7 @@ from app.task_scheduler import (
     _remote_worker_is_running,
     _sync_task_result,
     _track_task_state,
+    reconcile_merged_task,
     run_queue,
 )
 from app.tasks import TaskStatus, TaskStore
@@ -209,6 +210,44 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual(saved.status, TaskStatus.BLOCKED)
         self.assertEqual(saved.ci_status, "failed")
         self.assertEqual(saved.ci_attempts, 1)
+
+    def test_manual_merge_reconciliation_closes_issue_after_successful_ci(self) -> None:
+        task = self.store.create(
+            title="merged task",
+            issue_number=104,
+            repository="spider-su/investory",
+            source="github_issue",
+            metadata={"base_branch": "develop"},
+        )
+        for status in (TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.BLOCKED):
+            task = self.store.transition(task.task_id, status)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED,
+            pr_number=105,
+            pr_url="https://github.com/spider-su/investory/pull/105",
+        )
+        client = SimpleNamespace(
+            get_pull_request_details=lambda number: {
+                "number": number,
+                "is_merged": True,
+                "base_ref": "develop",
+                "head_ref": task.branch,
+                "head_sha": "b" * 40,
+                "merge_commit_sha": "c" * 40,
+                "merged_by": "spider-su",
+                "merged_at": "2026-10-06T10:00:00Z",
+                "body": "Closes spider-su/investory#104",
+            },
+            get_commit_ci=lambda sha: ("success", [{"sha": sha}]),
+            close_issue=lambda number: True,
+        )
+        with patch("app.github_client.GitHubAppClient", return_value=client):
+            completed = reconcile_merged_task(self.store, task.task_id)
+
+        self.assertEqual(completed.status, TaskStatus.COMPLETED)
+        self.assertEqual(completed.metadata["completion"]["recorded_via"], "manual_reconciliation")
+        self.assertTrue(completed.metadata["completion"]["issue_closed"])
 
     def test_ci_failure_dispatches_a_repair_worker(self) -> None:
         task = self.store.create(title="repair CI")

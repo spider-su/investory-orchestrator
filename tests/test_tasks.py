@@ -44,6 +44,49 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "QUEUED -> READY"):
             self.store.transition(task.task_id, TaskStatus.READY)
 
+    def test_completed_requires_human_merge_and_successful_post_merge_ci(self) -> None:
+        task = self.store.create(title="Run task")
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.BLOCKED)
+        evidence = {
+            "completion": {
+                "source": "human_merge",
+                "pr_number": 12,
+                "merge_commit_sha": "a" * 40,
+                "merged_at": "2026-10-06T10:00:00Z",
+                "merged_by": "reviewer",
+                "base_branch": "develop",
+                "post_merge_ci_status": "success",
+                "issue_closed": False,
+            }
+        }
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.COMPLETED,
+            pr_number=12,
+            pr_url="https://example.test/pull/12",
+            ci_status="green",
+            metadata=evidence,
+        )
+
+        self.assertEqual(task.status, TaskStatus.COMPLETED)
+        self.assertEqual(task.metadata["completion"]["merged_by"], "reviewer")
+
+    def test_completed_rejects_orchestrator_merge_or_missing_ci(self) -> None:
+        task = self.store.create(title="Run task")
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.BLOCKED)
+
+        with self.assertRaisesRegex(ValueError, "valid merge source"):
+            self.store.transition(
+                task.task_id,
+                TaskStatus.COMPLETED,
+                pr_number=12,
+                pr_url="https://example.test/pull/12",
+                ci_status="pending",
+                metadata={"completion": {"source": "automation"}},
+            )
+
     def test_checks_expected_status_atomically(self) -> None:
         task = self.store.create(title="Run task")
 

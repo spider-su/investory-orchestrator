@@ -35,14 +35,17 @@ coder. The scheduler never treats an agent response as authority to complete a
 task.
 
 Task states are `QUEUED`, `PLANNING`, `IMPLEMENTING`, `VALIDATING`,
-`REVIEWING`, `PUBLISHING`, `WAITING_CI`, `FINAL_REVIEW`, `READY`, `BLOCKED`,
-and `FAILED`. SQLite persists local task records separately from LangGraph
+`REVIEWING`, `PUBLISHING`, `WAITING_CI`, `FINAL_REVIEW`, `READY`, `COMPLETED`,
+`BLOCKED`, and `FAILED`. SQLite persists local task records separately from LangGraph
 checkpoints, while the k3s POC stores both in PostgreSQL under the configured
 schema. The queue claims a task in a transaction before launching its worker.
 In the split deployment it dispatches the workflow process over SSH to devMac.
 Waiting for CI occupies no worker process. A stopped worker is
 reconciled against its checkpoint on the next queue pass; an interrupted coder
-with a dirty worktree remains blocked for inspection.
+with a dirty worktree remains blocked for inspection. Final PR review is
+dispatched over SSH to the Mac workspace and is bound to the PR head SHA. READY
+tasks are polled until merge; successful post-merge CI is recorded before the
+linked GitHub issue is closed and the task becomes COMPLETED.
 
 Agent boundaries are structured: the planner returns a plan with assumptions,
 acceptance criteria, ordered steps, and validation; Codex returns a schema
@@ -56,8 +59,9 @@ branch is copied into each workspace so its `.git` metadata stays inside the
 directory mounted into a Dev Container. Direct prompt
 tasks use the configured target repository and do not publish issue comments.
 
-The workflow is supervised. The operator currently owns issue-readiness
-preflight and final pull-request approval.
+The workflow is supervised. The operator owns issue-readiness preflight and
+final pull-request approval; the scheduler records the subsequent merge and
+issue completion.
 
 ## Delivery stages
 
