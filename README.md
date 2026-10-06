@@ -66,6 +66,8 @@ docker compose run -d --name investory-orchestrator orchestrator \
   python -m app --run-queue
 docker compose run --rm orchestrator python -m app --list-tasks
 docker compose run --rm orchestrator python -m app --status <task-id>
+docker compose run --rm orchestrator python -m app \
+  --reconcile-merged-pr '<task-id>'
 ```
 
 By default, the SQLite task database and LangGraph checkpoints live under
@@ -81,7 +83,16 @@ Set `BASE_BRANCH` to the target repository's base branch. Resource defaults are
 uses the tightest limit. A worker exits after publishing its PR, so waiting for
 CI does not occupy a worker slot. CI and final-review repairs are bounded by
 `CI_RETRY_ATTEMPTS` (default 3). The existing implementation and validation
-repair loops use `MAX_ATTEMPTS` and `MAX_FINAL_ATTEMPTS`.
+repair loops use `MAX_ATTEMPTS` and `MAX_FINAL_ATTEMPTS`. Mac-side final-review
+attempts and timeout use `MAX_FINAL_REVIEW_ATTEMPTS` and
+`MAC_REVIEW_TIMEOUT_SECONDS`.
+
+With `MAC_SSH_TARGET` configured, whole-plan final review runs on the Mac
+runner against the exact open PR head. The scheduler polls READY tasks after
+human merge and records completion only after CI on the merge commit succeeds;
+it then closes the issue linked by the PR. For a merge made before scheduler
+tracking, `--reconcile-merged-pr '<task-id>'` verifies the merge, target branch,
+linked issue, and post-merge CI before recording the human merge.
 
 The planner, coder, and reviewer use the authenticated Codex CLI, not the
 OpenAI API. Set `HOST_CODEX_DIR` to the host's authenticated Codex directory.
@@ -99,7 +110,8 @@ READY when those identities match or are missing.
   inspection instead of being reset automatically.
 - Existing graph recovery still needs broader crash-boundary testing around
   local commits and final history rewriting.
-- Human approval and merge remain outside the orchestrator.
+- Human approval and merge remain outside the orchestrator; merged PRs are
+  tracked afterward and successful tasks move to `COMPLETED`.
 - Codex execution depends on available authentication and usage quota.
 
 ## Documentation

@@ -129,6 +129,13 @@ kubectl -n investory-orchestrator exec deployment/orchestrator-scheduler -- \
   python -m app --submit-issue <issue-number>
 ```
 
+Reconcile an issue whose PR was merged before the scheduler recorded it:
+
+```sh
+kubectl -n investory-orchestrator exec deployment/orchestrator-scheduler -- \
+  python -m app --reconcile-merged-pr 'spider-su/investory#104'
+```
+
 Open the dashboard locally:
 
 ```sh
@@ -138,9 +145,12 @@ kubectl -n investory-orchestrator port-forward \
 
 Then visit `http://127.0.0.1:8080` and enter `DASHBOARD_API_TOKEN`. The
 dashboard shows tasks, current status, pull request, priority, counts, and
-configured repositories. READY and BLOCKED issue tasks update one stable
-GitHub issue comment that mentions the configured login. Pull requests remain
-draft and require human review and merge.
+configured repositories. READY, BLOCKED, and COMPLETED issue tasks update one
+stable GitHub issue comment that mentions the configured login. Final review runs on
+devMac over SSH against the exact PR head. Pull requests require human review
+and merge; after merge, the scheduler waits for post-merge CI, records
+`COMPLETED`, and closes the linked issue. Use `--reconcile-merged-pr <task-id>`
+for a human merge completed before the scheduler could track it.
 
 ## Current acceptance boundary
 
@@ -153,6 +163,6 @@ Still required before calling the POC verified: provision runtime secrets,
 build/publish an immutable image, confirm SSH key authentication, apply the
 manifest, verify the Mac uses the same PostgreSQL schema, configure an actual
 GitHub Project and its priority field (the current GitHub CLI token lacks
-`read:project`), and run one issue through READY/BLOCKED notification plus
-human PR review. Do not enable unattended issue polling until those checks
-pass.
+`read:project`), and run one issue through remote final review, human merge,
+post-merge CI, and issue completion. Do not enable unattended issue polling
+until those checks pass.

@@ -12,6 +12,7 @@ from app.task_scheduler import (
     _sync_task_result,
     _task_status_for_workflow,
     _track_task_state,
+    reconcile_merged_task,
     run_queue,
 )
 
@@ -149,6 +150,11 @@ def run_cli(
     parser.add_argument("--update-task", metavar="TASK_ID")
     parser.add_argument("--body", help="Task description or updated task body.")
     parser.add_argument("--status", metavar="TASK_ID")
+    parser.add_argument(
+        "--reconcile-merged-pr",
+        metavar="TASK_ID",
+        help="Verify a human-merged PR, close its linked issue, and complete the task.",
+    )
     parser.add_argument("--list-tasks", action="store_true")
     parser.add_argument("--run-queue", action="store_true")
     parser.add_argument("--once", action="store_true")
@@ -169,6 +175,7 @@ def run_cli(
             or args.submit_task
             or args.update_task
             or args.status
+            or args.reconcile_merged_pr
             or args.list_tasks
             or args.run_queue
             or args.task_id
@@ -230,6 +237,10 @@ def run_cli(
         task = task_store.get(args.status)
         if task is None:
             raise RuntimeError(f"Task not found: {args.status}")
+        _print_task(task)
+        return
+    if args.reconcile_merged_pr:
+        task = reconcile_merged_task(task_store, args.reconcile_merged_pr)
         _print_task(task)
         return
     if args.list_tasks:

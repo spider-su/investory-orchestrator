@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -117,6 +118,93 @@ def _run(arguments: list[str]) -> int:
         return subprocess.call(command, cwd=Path(__file__).resolve().parents[1], env=environment)
 
 
+def _review(arguments: list[str]) -> int:
+    if len(arguments) != 2:
+        raise ValueError("review expects one task id")
+    task_id = _task_id(arguments[1])
+    try:
+        request = json.load(sys.stdin)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("review request must be a JSON object on stdin") from error
+    if not isinstance(request, dict) or request.get("task_id") != task_id:
+        raise ValueError("review request task id does not match the SSH command")
+
+    workspaces_dir = Path(
+        os.getenv("MAC_WORKSPACES_DIR", "~/.investory-orchestrator/task-workspaces")
+    ).expanduser().resolve()
+    workspace = Path(str(request.get("workspace", ""))).expanduser().resolve()
+    if workspace == workspaces_dir or not workspace.is_relative_to(workspaces_dir):
+        raise ValueError("review workspace is outside MAC_WORKSPACES_DIR")
+    if not workspace.is_dir():
+        raise ValueError("review workspace does not exist")
+    expected_branch = request.get("expected_branch")
+    expected_head_sha = request.get("expected_head_sha")
+    if (
+        not isinstance(expected_branch, str)
+        or not BRANCH_PATTERN.fullmatch(expected_branch)
+    ):
+        raise ValueError("invalid expected review branch")
+    if (
+        not isinstance(expected_head_sha, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+    ):
+        raise ValueError("invalid expected review commit")
+
+    lock_path = _lock_path(task_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("task has an active Mac worker") from error
+
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=workspace, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=workspace, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=workspace, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        if head_sha != expected_head_sha:
+            raise RuntimeError("Mac workspace HEAD does not match the PR head SHA")
+        if branch != expected_branch:
+            raise RuntimeError("Mac workspace branch does not match the PR head branch")
+        if status:
+            raise RuntimeError(
+                "Mac workspace is not clean; final review requires a clean worktree"
+            )
+
+        from app.agents.reviewer import review_implementation, review_identity
+
+        result = review_implementation(
+            workspace=workspace,
+            issue_number=int(request["issue_number"]),
+            issue_title=str(request["issue_title"]),
+            issue_body=str(request.get("issue_body", "")),
+            plan=request["plan"],
+            validation_output=str(request.get("validation_output", "")),
+            review_scope="whole_plan",
+            baseline_sha=request.get("baseline_sha") or None,
+            coder_report=request.get("coder_report"),
+            workspace_audit=request.get("workspace_audit"),
+        )
+        response = {
+            "task_id": task_id,
+            "head_sha": head_sha,
+            "branch": branch,
+            "clean_worktree": True,
+            "review": result.model_dump(mode="json"),
+            "reviewer_identity": review_identity(),
+        }
+        print(json.dumps(response, separators=(",", ":")))
+    return 0
+
+
 def main() -> int:
     try:
         arguments = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
@@ -124,8 +212,10 @@ def main() -> int:
             return _probe(arguments[1])
         if arguments and arguments[0] == "run":
             return _run(arguments)
-        raise ValueError("only run and probe requests are accepted")
-    except (OSError, ValueError) as error:
+        if arguments and arguments[0] == "review":
+            return _review(arguments)
+        raise ValueError("only run, review, and probe requests are accepted")
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"Rejected Mac runner request: {error}", file=sys.stderr)
         return 64
 

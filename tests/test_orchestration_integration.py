@@ -52,6 +52,24 @@ class FakeGitHub:
     def get_pull_request_ci(self, pr_number: int):
         return self.ci_state, {"run_id": 9001, "url": "https://example.test/actions/9001"}
 
+    def get_pull_request_details(self, pr_number: int):
+        pull_request = self.pull_requests[-1]
+        return {
+            "number": pr_number,
+            "url": "https://example.test/pull/23",
+            "state": "open",
+            "is_merged": False,
+            "is_draft": True,
+            "base_ref": pull_request["base"],
+            "head_ref": pull_request["head"],
+            "head_sha": self.branch_heads.get(pull_request["head"], "final-sha"),
+            "merge_commit_sha": None,
+            "merged_at": "",
+            "merged_by": "",
+            "title": pull_request["title"],
+            "body": pull_request["body"],
+        }
+
 
 class OrchestrationIntegrationTests(unittest.TestCase):
     def test_ci_failure_blocks_and_terminal_notification_is_idempotent(self) -> None:

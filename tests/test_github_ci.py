@@ -60,6 +60,14 @@ class PullRequestCiTests(unittest.TestCase):
         self.assertEqual(status, "failure")
         self.assertIn("trace", details[0]["output"])
 
+    def test_pull_request_closing_keyword_links_issue(self) -> None:
+        self.assertTrue(GitHubAppClient.pull_request_closes_issue(
+            {"body": "Resolves spider-su/investory#104"}, 104
+        ))
+        self.assertFalse(GitHubAppClient.pull_request_closes_issue(
+            {"body": "Related to #104"}, 104
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

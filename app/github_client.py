@@ -12,12 +12,12 @@ from github.Repository import Repository
 
 
 class GitHubAppClient:
-    def __init__(self) -> None:
+    def __init__(self, repository_name: str | None = None) -> None:
         self.app_id = int(self._required_env("GITHUB_APP_ID"))
         self.installation_id = int(
             self._required_env("GITHUB_INSTALLATION_ID")
         )
-        self.repository_name = self._required_env("GITHUB_REPOSITORY")
+        self.repository_name = repository_name or self._required_env("GITHUB_REPOSITORY")
 
         private_key_path = Path(
             self._required_env("GITHUB_PRIVATE_KEY_PATH")
@@ -277,6 +277,51 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def get_pull_request_details(self, pull_request_number: int) -> dict[str, Any]:
+        pull = self.get_pull_request(pull_request_number)
+        merge_commit = getattr(pull, "merge_commit_sha", None)
+        merged_by = getattr(pull, "merged_by", None)
+        merged_at = getattr(pull, "merged_at", None)
+        return {
+            "number": pull.number,
+            "url": pull.html_url,
+            "state": pull.state,
+            "is_merged": bool(pull.merged),
+            "is_draft": bool(pull.draft),
+            "base_ref": pull.base.ref,
+            "head_ref": pull.head.ref,
+            "head_sha": pull.head.sha,
+            "merge_commit_sha": merge_commit,
+            "merged_at": merged_at.isoformat() if merged_at else "",
+            "merged_by": getattr(merged_by, "login", "") if merged_by else "",
+            "title": pull.title,
+            "body": pull.body or "",
+        }
+
+    @staticmethod
+    def pull_request_closes_issue(details: dict[str, Any], issue_number: int) -> bool:
+        import re
+
+        body = details.get("body", "")
+        return bool(re.search(
+            rf"(?im)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+"
+            rf"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#{issue_number}\b",
+            body,
+        ))
+
+    def close_issue(self, issue_number: int) -> bool:
+        try:
+            issue = self.get_issue(issue_number)
+            if issue.state == "closed":
+                return False
+            issue.edit(state="closed")
+            return True
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to close issue #{issue_number}: "
+                f"{error.status} {error.data}"
+            ) from error
+
     def get_pull_request_ci(
         self,
         pull_request_number: int | None,
@@ -285,13 +330,32 @@ class GitHubAppClient:
         if pull_request_number is None:
             raise RuntimeError("Task has no pull request to inspect for CI.")
         pull = self.get_pull_request(pull_request_number)
+        return self.get_commit_ci(pull.head.sha)
+
+    def get_commit_ci(
+        self,
+        commit_sha: str,
+    ) -> tuple[str, list[dict[str, str]]]:
         repository = self.get_repository()
-        commit = repository.get_commit(pull.head.sha)
+        try:
+            commit = repository.get_commit(commit_sha)
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to access commit {commit_sha}: "
+                f"{error.status} {error.data}"
+            ) from error
         results: list[dict[str, str]] = []
         pending = False
         failed = False
 
-        for check in commit.get_check_runs():
+        try:
+            check_runs = commit.get_check_runs()
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to inspect CI for commit {commit_sha}: "
+                f"{error.status} {error.data}"
+            ) from error
+        for check in check_runs:
             conclusion = (check.conclusion or "").lower()
             status = (check.status or "").lower()
             output = getattr(check, "output", None)
@@ -315,7 +379,13 @@ class GitHubAppClient:
             elif conclusion not in {"success", "skipped", "neutral"}:
                 failed = True
 
-        combined = commit.get_combined_status()
+        try:
+            combined = commit.get_combined_status()
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to inspect commit status for {commit_sha}: "
+                f"{error.status} {error.data}"
+            ) from error
         for item in combined.statuses:
             state = (item.state or "").lower()
             results.append({

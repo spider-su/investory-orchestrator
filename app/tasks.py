@@ -24,6 +24,7 @@ class TaskStatus(StrEnum):
     WAITING_CI = "WAITING_CI"
     FINAL_REVIEW = "FINAL_REVIEW"
     READY = "READY"
+    COMPLETED = "COMPLETED"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
 
@@ -37,8 +38,9 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PUBLISHING: frozenset({TaskStatus.WAITING_CI, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.WAITING_CI: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.FINAL_REVIEW, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.FINAL_REVIEW: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.READY: frozenset(),
-    TaskStatus.BLOCKED: frozenset({TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.VALIDATING, TaskStatus.REVIEWING, TaskStatus.PUBLISHING, TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW, TaskStatus.READY, TaskStatus.FAILED}),
+    TaskStatus.READY: frozenset({TaskStatus.COMPLETED, TaskStatus.BLOCKED}),
+    TaskStatus.COMPLETED: frozenset(),
+    TaskStatus.BLOCKED: frozenset({TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.VALIDATING, TaskStatus.REVIEWING, TaskStatus.PUBLISHING, TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW, TaskStatus.READY, TaskStatus.COMPLETED, TaskStatus.FAILED}),
     TaskStatus.FAILED: frozenset({TaskStatus.QUEUED}),
 }
 
@@ -516,8 +518,11 @@ class TaskStore:
                 missing = []
                 if ci_status != "green":
                     missing.append("green CI")
-                if not updates.get("pr_number", row["pr_number"]) or not updates.get("pr_url", row["pr_url"]):
-                    missing.append("draft PR")
+                if (
+                    not updates.get("pr_number", row["pr_number"])
+                    or not updates.get("pr_url", row["pr_url"])
+                ):
+                    missing.append("pull request")
                 if metadata.get("final_validation_status") != "validation_success":
                     missing.append("successful local validation")
                 if metadata.get("final_review_status") != "approved":
@@ -528,6 +533,52 @@ class TaskStore:
                     missing.append("clean worktree evidence")
                 if missing:
                     raise ValueError("Cannot mark task READY without " + ", ".join(missing))
+            if status == TaskStatus.COMPLETED:
+                metadata_value = updates.get("metadata")
+                metadata = (
+                    metadata_value
+                    if isinstance(metadata_value, dict)
+                    else (
+                        row["metadata"]
+                        if metadata_value is None and isinstance(row["metadata"], dict)
+                        else json.loads(metadata_value or row["metadata"])
+                    )
+                )
+                completion_value = metadata.get("completion", {})
+                completion = (
+                    completion_value if isinstance(completion_value, dict) else {}
+                )
+                required = (
+                    "source", "merge_commit_sha", "merged_at", "merged_by",
+                    "base_branch", "post_merge_ci_status", "issue_closed",
+                )
+                missing = [
+                    key for key in required
+                    if key not in completion
+                    or completion[key] is None
+                    or completion[key] == ""
+                ]
+                if completion.get("source") != "human_merge":
+                    missing.append("valid merge source")
+                if (
+                    not updates.get("pr_number", row["pr_number"])
+                    or not updates.get("pr_url", row["pr_url"])
+                ):
+                    missing.append("recorded pull request")
+                elif completion.get("pr_number") != updates.get("pr_number", row["pr_number"]):
+                    missing.append("matching pull request evidence")
+                if not re.fullmatch(r"[0-9a-f]{40}", str(completion.get("merge_commit_sha", ""))):
+                    missing.append("valid merge commit SHA")
+                if row["issue_number"] is not None and completion.get("issue_closed") is not True:
+                    missing.append("closed linked issue")
+                if updates.get("ci_status", row["ci_status"]) != "green":
+                    missing.append("green post-merge CI")
+                if completion.get("post_merge_ci_status") != "success":
+                    missing.append("successful post-merge CI evidence")
+                if missing:
+                    raise ValueError(
+                        "Cannot mark task COMPLETED without " + ", ".join(missing)
+                    )
             serialized = {}
             for key, value in updates.items():
                 if key == "metadata":
@@ -552,7 +603,20 @@ class TaskStore:
                 "INSERT INTO task_events "
                 "(event_id, task_id, from_status, to_status, detail, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (uuid.uuid4().hex, task_id, current.value, status.value, "transition", now),
+                (
+                    uuid.uuid4().hex,
+                    task_id,
+                    current.value,
+                    status.value,
+                    (
+                        f"completed:{metadata['completion']['source']}:"
+                        f"pr#{metadata['completion']['pr_number']}:"
+                        f"{metadata['completion']['merge_commit_sha']}"
+                        if status == TaskStatus.COMPLETED
+                        else "transition"
+                    ),
+                    now,
+                ),
             )
             row = self._execute(
                 connection,

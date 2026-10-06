@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 import shlex
@@ -77,6 +78,7 @@ def _sync_task_result(
             "issue_body": workflow.get("issue_body", ""),
             "plan": workflow.get("plan", {}),
             "issue_baseline_sha": workflow.get("issue_baseline_sha", ""),
+            "workspace_audit": workflow.get("workspace_audit", {}),
             "final_validation_status": workflow.get("final_validation_status", ""),
             "final_validation_output": workflow.get("final_validation_output", ""),
             "final_review_status": workflow.get("final_review_status", ""),
@@ -126,6 +128,7 @@ def _sync_task_result(
                 "issue_title": workflow.get("issue_title", ""),
                 "issue_body": workflow.get("issue_body", ""),
                 "plan": workflow.get("plan", {}),
+                "workspace_audit": workflow.get("workspace_audit", {}),
                 "coder_report": workflow.get("coder_report", {}),
                 "blocked_stage": workflow.get("blocked_stage", ""),
             },
@@ -172,6 +175,12 @@ def _print_task(task: Any) -> None:
             f"final-review repairs={metadata.get('final_review_repairs', 0)}"
         )
         print(f"Tests: {metadata.get('final_validation_status', 'unknown')}")
+    if task.status == TaskStatus.COMPLETED:
+        completion = task.metadata.get("completion", {})
+        print(f"PR: {task.pr_url}")
+        print(f"Merge commit: {completion.get('merge_commit_sha', 'unknown')}")
+        print(f"Merged by: {completion.get('merged_by', 'unknown')}")
+        print(f"Issue closed: {completion.get('issue_closed', False)}")
         validation_output = metadata.get("final_validation_output", "").strip()
         if validation_output:
             print(validation_output[-2000:])
@@ -316,9 +325,6 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                 ) or (
                     task.metadata.get("final_review_status") == "changes_required"
                     and task.metadata.get("final_review_repairs", 0) <= retry_limit
-                ) or (
-                    task.metadata.get("final_review_retryable", False)
-                    and task.metadata.get("final_review_attempts", 0) <= retry_limit
                 ) or task.metadata.get("recovery_pending", False)
             )
         )
@@ -422,7 +428,7 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
 
 def _notify_terminal_tasks(store: TaskStore) -> None:
     repositories = {item["repository"]: item for item in store.list_repositories()}
-    candidates = store.list({TaskStatus.READY, TaskStatus.BLOCKED})
+    candidates = store.list({TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.COMPLETED})
     for task in candidates:
         if task.issue_number is None:
             continue
@@ -440,6 +446,13 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
                 f"Draft PR: {task.pr_url}\n"
                 "CI is green and the final review passed. Please review and merge manually."
             )
+        elif task.status == TaskStatus.COMPLETED:
+            completion = task.metadata.get("completion", {})
+            body = (
+                f"{mention}Investory Orchestrator recorded this task as completed.\n\n"
+                f"Merged PR: {task.pr_url}\n"
+                f"Merge commit: `{completion.get('merge_commit_sha', 'unknown')}`"
+            )
         else:
             body = (
                 f"{mention}Investory Orchestrator is blocked and needs attention.\n\n"
@@ -449,7 +462,7 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
         try:
             from app.github_client import GitHubAppClient
 
-            GitHubAppClient().upsert_issue_comment(
+            GitHubAppClient(task.repository).upsert_issue_comment(
                 task.issue_number,
                 f"{marker}\n{body}",
                 marker=marker,
@@ -477,17 +490,21 @@ def _pid_alive(pid: Any) -> bool:
 
 
 def _poll_ci(store: TaskStore) -> None:
+    retryable_reviews = [
+        task for task in store.list({TaskStatus.BLOCKED})
+        if task.metadata.get("final_review_retryable")
+    ]
+    for task in retryable_reviews:
+        _run_final_review(store, task)
     waiting = store.list({TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW})
-    if not waiting:
-        return
-    from app.github_client import GitHubAppClient
-
-    client = GitHubAppClient()
     for task in waiting:
         if task.status == TaskStatus.FINAL_REVIEW:
             _run_final_review(store, task)
             continue
         try:
+            from app.github_client import GitHubAppClient
+
+            client = GitHubAppClient(task.repository)
             state, details = client.get_pull_request_ci(task.pr_number)
         except RuntimeError as error:
             print(f"CI status unavailable for task {task.task_id}: {error}")
@@ -509,46 +526,326 @@ def _poll_ci(store: TaskStore) -> None:
                 blocked_reason="CI failed; repair requires --resume after inspecting the saved workflow.",
                 metadata={**task.metadata, "ci_details": details},
             )
+    _poll_merged_tasks(store)
+
+
+def _task_base_branch(store: TaskStore, task: Any) -> str:
+    configured = store.get_repository(task.repository)
+    return str(
+        task.metadata.get("base_branch")
+        or (configured or {}).get("base_branch")
+        or os.getenv("BASE_BRANCH", "develop")
+    )
+
+
+def _issue_linked(details: dict[str, Any], issue_number: int) -> bool:
+    from app.github_client import GitHubAppClient
+
+    return GitHubAppClient.pull_request_closes_issue(details, issue_number)
+
+
+def _record_merged_task(
+    store: TaskStore,
+    task: Any,
+    client: Any,
+    details: dict[str, Any],
+    checks: list[dict[str, str]],
+    *,
+    source: str,
+    recorded_via: str,
+    ci_state: str | None = None,
+) -> None:
+    if not details.get("is_merged"):
+        raise RuntimeError(f"PR #{task.pr_number} has not been merged")
+    if details.get("number") != task.pr_number:
+        raise RuntimeError("GitHub returned a different pull request than the task records")
+    expected_base = _task_base_branch(store, task)
+    if details.get("base_ref") != expected_base:
+        raise RuntimeError(
+            f"PR #{task.pr_number} merged to {details.get('base_ref')!r}; "
+            f"expected {expected_base!r}"
+        )
+    if task.branch and details.get("head_ref") != task.branch:
+        raise RuntimeError(
+            f"PR #{task.pr_number} head branch {details.get('head_ref')!r} "
+            f"does not match task branch {task.branch!r}"
+        )
+    merge_sha = details.get("merge_commit_sha")
+    merged_by = details.get("merged_by")
+    merged_at = details.get("merged_at")
+    if not merge_sha or not merged_by or not merged_at:
+        raise RuntimeError("GitHub did not provide complete merge evidence")
+    if task.issue_number is not None and not _issue_linked(details, task.issue_number):
+        raise RuntimeError(
+            f"PR #{task.pr_number} does not explicitly close issue #{task.issue_number}"
+        )
+    if ci_state is None:
+        ci_state, merge_checks = client.get_commit_ci(merge_sha)
+    else:
+        merge_checks = checks
+    if ci_state != "success":
+        raise RuntimeError(
+            f"Post-merge CI for {merge_sha} is {ci_state}; completion is not recorded"
+        )
+    issue_closed = False
+    if task.issue_number is not None:
+        client.close_issue(task.issue_number)
+        issue_closed = True
+    metadata = {
+        **task.metadata,
+        "completion": {
+            "source": source,
+            "recorded_via": recorded_via,
+            "pr_number": task.pr_number,
+            "merge_commit_sha": merge_sha,
+            "merged_at": merged_at,
+            "merged_by": merged_by,
+            "base_branch": expected_base,
+            "post_merge_ci_status": ci_state,
+            "post_merge_ci_details": merge_checks,
+            "issue_closed": issue_closed,
+        },
+    }
+    store.transition(
+        task.task_id,
+        TaskStatus.COMPLETED,
+        expected=task.status,
+        ci_status="green",
+        blocked_reason="",
+        metadata=metadata,
+    )
+
+
+def _poll_merged_tasks(store: TaskStore) -> None:
+    from app.github_client import GitHubAppClient
+
+    for task in store.list({TaskStatus.READY}):
+        try:
+            client = GitHubAppClient(task.repository)
+            details = client.get_pull_request_details(task.pr_number)
+            if details["is_merged"]:
+                expected_head = task.metadata.get("final_review_head_sha")
+                if expected_head and details["head_sha"] != expected_head:
+                    raise RuntimeError(
+                        "PR head changed after final review; task needs a new review"
+                    )
+                merge_state, merge_checks = client.get_commit_ci(
+                    details.get("merge_commit_sha") or ""
+                )
+                if merge_state == "pending":
+                    continue
+                if merge_state != "success":
+                    raise RuntimeError(
+                        f"Post-merge CI is {merge_state} for "
+                        f"{details.get('merge_commit_sha')}"
+                    )
+                _record_merged_task(
+                    store, task, client, details, merge_checks,
+                    source="human_merge", recorded_via="scheduler_poll",
+                    ci_state=merge_state,
+                )
+            elif details["state"] == "closed":
+                store.transition(
+                    task.task_id,
+                    TaskStatus.BLOCKED,
+                    expected=TaskStatus.READY,
+                    blocked_reason="PR was closed without merging.",
+                )
+        except (RuntimeError, ValueError, KeyError) as error:
+            current = store.get(task.task_id)
+            if current and current.status == TaskStatus.READY:
+                store.transition(
+                    task.task_id,
+                    TaskStatus.BLOCKED,
+                    expected=TaskStatus.READY,
+                    blocked_reason=f"Unable to complete merged PR: {error}",
+                    metadata={**current.metadata, "completion_retryable": True},
+                )
+            print(f"Merged PR status unavailable for task {task.task_id}: {error}")
+
+
+def reconcile_merged_task(store: TaskStore, task_id: str) -> Any:
+    task = store.get(task_id)
+    if task is None:
+        raise RuntimeError(f"Task not found: {task_id}")
+    if task.status == TaskStatus.COMPLETED:
+        return task
+    if task.status not in {TaskStatus.BLOCKED, TaskStatus.READY}:
+        raise RuntimeError(
+            f"Only BLOCKED or READY tasks can be reconciled; task is {task.status.value}"
+        )
+    if not task.pr_number:
+        raise RuntimeError("Task has no recorded pull request")
+    from app.github_client import GitHubAppClient
+
+    client = GitHubAppClient(task.repository)
+    details = client.get_pull_request_details(task.pr_number)
+    _record_merged_task(
+        store,
+        task,
+        client,
+        details,
+        [],
+        source="human_merge",
+        recorded_via="manual_reconciliation",
+    )
+    completed = store.get(task_id)
+    assert completed is not None
+    return completed
 
 
 def _run_final_review(store: TaskStore, task: Any) -> None:
     from pathlib import Path
 
     from app.agents.reviewer import (
-        ReviewerError,
+        ReviewResult,
         review_classification,
         review_identity,
         review_implementation,
     )
+    from app.github_client import GitHubAppClient
 
     metadata = task.metadata
     try:
-        review = review_implementation(
-            workspace=Path(task.workspace),
-            issue_number=int(metadata["issue_number"]),
-            issue_title=metadata["issue_title"],
-            issue_body=metadata["issue_body"],
-            plan=metadata["plan"],
-            validation_output=metadata.get("final_validation_output", ""),
-            review_scope="whole_plan",
-            baseline_sha=metadata.get("issue_baseline_sha") or None,
-        )
-    except (ReviewerError, KeyError, OSError, ValueError) as error:
+        remote_review = bool(_ssh_target())
+        verify_pr = remote_review or bool(os.getenv("GITHUB_APP_ID"))
+        if verify_pr:
+            if task.pr_number is None:
+                raise RuntimeError("Task has no pull request for final review")
+            client = GitHubAppClient(task.repository)
+            details = client.get_pull_request_details(task.pr_number)
+            expected_base = _task_base_branch(store, task)
+            if details["is_merged"] or details["state"] != "open":
+                raise RuntimeError(
+                    "PR is no longer open; use merged-PR reconciliation if it was merged"
+                )
+            if details["base_ref"] != expected_base:
+                raise RuntimeError(
+                    f"PR targets {details['base_ref']!r}; expected {expected_base!r}"
+                )
+            if details["head_ref"] != task.branch:
+                raise RuntimeError("PR head branch does not match the task branch")
+        else:
+            details = {"head_sha": "", "head_ref": task.branch}
+        if not task.workspace:
+            raise RuntimeError("Task is missing its Mac workspace path")
+        if verify_pr and not details["head_sha"]:
+            raise RuntimeError("GitHub did not provide the PR head SHA")
+        request = {
+            "task_id": task.task_id,
+            "workspace": task.workspace,
+            "expected_branch": details["head_ref"],
+            "expected_head_sha": details["head_sha"],
+            "issue_number": int(metadata["issue_number"]),
+            "issue_title": metadata["issue_title"],
+            "issue_body": metadata.get("issue_body", ""),
+            "plan": metadata["plan"],
+            "validation_output": metadata.get("final_validation_output", ""),
+            "baseline_sha": metadata.get("issue_baseline_sha"),
+            "coder_report": metadata.get("coder_report"),
+            "workspace_audit": metadata.get("workspace_audit"),
+        }
+        if remote_review:
+            result = subprocess.run(
+                _ssh_command(["review", task.task_id]),
+                input=json.dumps(request),
+                text=True,
+                capture_output=True,
+                timeout=int(os.getenv("MAC_REVIEW_TIMEOUT_SECONDS", "1800")),
+                check=False,
+            )
+            if result.returncode:
+                raise RuntimeError(
+                    f"Mac final reviewer exited {result.returncode}: "
+                    f"{result.stderr.strip()}"
+                )
+            reviewed = json.loads(result.stdout)
+            if (
+                reviewed.get("task_id") != task.task_id
+                or reviewed.get("head_sha") != details["head_sha"]
+                or reviewed.get("branch") != details["head_ref"]
+            ):
+                raise RuntimeError(
+                    "Mac final reviewer returned mismatched task or PR evidence"
+                )
+            review_data = ReviewResult.model_validate(reviewed["review"]).model_dump(
+                mode="json"
+            )
+            reviewer = reviewed["reviewer_identity"]
+            if not isinstance(reviewer, dict) or not all(
+                isinstance(reviewer.get(key), str)
+                for key in ("backend", "provider", "model")
+            ):
+                raise RuntimeError("Mac final reviewer returned an invalid identity")
+            clean_worktree = reviewed.get("clean_worktree") is True
+        else:
+            local_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=task.workspace,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            local_branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=task.workspace,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            if verify_pr and (
+                local_head != details["head_sha"] or local_branch != details["head_ref"]
+            ):
+                raise RuntimeError("Local workspace does not match the open PR head")
+            if not verify_pr:
+                details["head_sha"] = local_head
+                details["head_ref"] = local_branch
+            review = review_implementation(
+                workspace=Path(task.workspace),
+                issue_number=request["issue_number"],
+                issue_title=request["issue_title"],
+                issue_body=request["issue_body"],
+                plan=request["plan"],
+                validation_output=request["validation_output"],
+                review_scope="whole_plan",
+                baseline_sha=request["baseline_sha"] or None,
+                coder_report=request["coder_report"],
+                workspace_audit=request["workspace_audit"],
+            )
+            review_data = review.model_dump(mode="json")
+            reviewer = review_identity()
+            cleanliness = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=task.workspace,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            clean_worktree = not cleanliness.stdout.strip()
+    except (
+        RuntimeError, ValueError, KeyError, OSError, json.JSONDecodeError,
+        subprocess.SubprocessError,
+    ) as error:
         attempts = metadata.get("final_review_attempts", 0) + 1
+        retry_limit = max(0, int(os.getenv("MAX_FINAL_REVIEW_ATTEMPTS", "3")))
+        retryable = attempts < retry_limit
         store.transition(
             task.task_id,
             TaskStatus.BLOCKED,
-            blocked_reason=f"Final PR review failed: {error}",
+            blocked_reason=(
+                f"Final PR review failed: {error}"
+                if retryable
+                else f"Final PR review failed after {attempts} attempts: {error}"
+            ),
             metadata={
                 **metadata,
                 "final_review_attempts": attempts,
-                "final_review_retryable": True,
+                "final_review_retryable": retryable,
                 "final_review_error": str(error),
             },
         )
         return
 
-    reviewer = review_identity()
     independence = review_classification(
         metadata.get("coder_model", ""),
         reviewer["model"],
@@ -557,43 +854,35 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
     )
     updated = {
         **metadata,
-        "final_review": review.model_dump(mode="json"),
-        "final_review_status": review.status,
+        "final_review": review_data,
+        "final_review_status": review_data["status"],
         "final_review_identity": reviewer,
         "final_review_independence": independence,
         "final_review_attempts": metadata.get("final_review_attempts", 0) + 1,
         "final_review_retryable": False,
+        "final_review_head_sha": details["head_sha"],
     }
-    if review.status == "approved":
+    if review_data["status"] == "approved":
         missing_gates: list[str] = []
         if task.ci_status != "green":
             missing_gates.append("CI is not green")
         if task.pr_number is None or not task.pr_url:
-            missing_gates.append("draft PR is missing")
+            missing_gates.append("pull request is missing")
         if metadata.get("final_validation_status") != "validation_success":
             missing_gates.append("local validation is not recorded as passed")
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain", "--untracked-files=all"],
-                cwd=task.workspace,
-                text=True,
-                capture_output=True,
-                check=True,
+        if not clean_worktree:
+            missing_gates.append(
+                "worktree is not clean or cleanliness could not be verified"
             )
-            if result.stdout.strip():
-                missing_gates.append("worktree is not clean")
-        except (OSError, subprocess.CalledProcessError):
-            missing_gates.append("worktree cleanliness could not be verified")
         if independence != "independent":
             missing_gates.append("reviewer identity is not independent of the coder")
         if missing_gates:
             updated["ready_gates"] = {
-                "draft_pr": task.pr_number is not None and bool(task.pr_url),
+                "pull_request": task.pr_number is not None and bool(task.pr_url),
                 "local_validation": metadata.get("final_validation_status") == "validation_success",
                 "ci_green": task.ci_status == "green",
                 "independent_review": independence == "independent",
-                "clean_worktree": "worktree is not clean" not in missing_gates
-                and "worktree cleanliness could not be verified" not in missing_gates,
+                "clean_worktree": clean_worktree,
             }
             store.transition(
                 task.task_id,
@@ -603,7 +892,7 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
             )
             return
         updated["ready_gates"] = {
-            "draft_pr": True,
+            "pull_request": True,
             "local_validation": True,
             "ci_green": True,
             "independent_review": True,
@@ -617,7 +906,7 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
             metadata=updated,
         )
         return
-    feedback = review.model_dump_json(indent=2)
+    feedback = json.dumps(review_data, indent=2)
     store.transition(
         task.task_id,
         TaskStatus.BLOCKED,
