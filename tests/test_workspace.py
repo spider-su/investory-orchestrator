@@ -8,6 +8,7 @@ import tempfile
 from types import SimpleNamespace
 
 from app.workspace import (
+    capture_workspace_audit,
     _validate_existing_workspace,
     commit_step,
     prepare_workspace,
@@ -15,6 +16,20 @@ from app.workspace import (
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_workspace_audit_captures_initial_git_state(self) -> None:
+        workspace = Path("/tmp/issue-104")
+        with patch(
+            "app.workspace._run",
+            side_effect=["agent/issue-104\n", "abc123\n", "?? reports/local.md\n"],
+        ) as run_mock:
+            audit = capture_workspace_audit(workspace)
+
+        self.assertEqual(audit["branch"], "agent/issue-104")
+        self.assertEqual(audit["head_sha"], "abc123")
+        self.assertEqual(audit["status_porcelain"], "?? reports/local.md")
+        self.assertFalse(audit["clean"])
+        self.assertEqual(run_mock.call_count, 3)
+
     def test_commit_step_returns_new_commit_sha(self) -> None:
         workspace = Path("D:/projects/investory-orchestrator/workspaces/issue-1")
 

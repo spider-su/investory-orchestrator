@@ -93,13 +93,19 @@ to the issue author.
 For each normalized plan step:
 
 1. Mark the step in progress.
-2. Run the coder with the issue, current step, attempt metadata, previous
-   validation output, reviewer findings, and relevant Git diff.
-3. Run deterministic repository validation inside the Dev Container.
-4. Route validation failures back to the coder while attempts remain.
-5. Run the reviewer after validation succeeds.
-6. Route blocking review findings back to the coder while attempts remain.
-7. Create a local checkpoint commit after approval.
+2. Capture the initial task-checkout branch, commit, and tracked/untracked
+   status before planner or coder agents run.
+3. Run the coder with the issue, exactly the current step, attempt metadata,
+   initial checkout audit, previous validation output, reviewer findings, and
+   relevant Git diff.
+4. Run deterministic validation selected from the task scope. Documentation-only
+   issues that prohibit application tests use `git diff --check` and a changed-
+   path scope check without starting the target test suite or Dev Container.
+5. Route validation failures back to the coder while attempts remain.
+6. Run the reviewer after validation succeeds. The reviewer receives the
+   current coder report and orchestrator-captured checkout audit.
+7. Route blocking review findings back to the coder while attempts remain.
+8. Create a local checkpoint commit after approval.
 
 Later steps must not be implemented early. Step progression happens only after
 approval of the current step.
@@ -143,7 +149,8 @@ hold:
 - The reviewer has read-only access. It cannot modify the workspace, commit,
   push, or repair the implementation it is judging.
 - The reviewer receives the issue contract, relevant plan scope, repository
-  instructions, current diff, and deterministic validation result.
+  instructions, current coder report, initial checkout audit, current diff,
+  and deterministic validation result.
 - The reviewer does not receive coder chain-of-thought, hidden reasoning,
   internal prompt transcript, or an instruction to defend the coder's design.
 - The workflow records the coder and reviewer backend, provider, and model

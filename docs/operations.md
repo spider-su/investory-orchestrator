@@ -342,6 +342,11 @@ meaning from the process exit code; only the structured result controls whether
 the workflow retries the coder.
 
 The current Investory target uses a Dev Container and Maven-based validation.
+When an issue explicitly limits its scope to documentation and says not to run
+application tests, the runner skips Dev Container startup and Maven. It instead
+runs `git diff --check`, records `git status`, and rejects changed or untracked
+files outside documentation extensions. The coder and reviewer still run, and
+their reports remain subject to the issue's acceptance criteria.
 
 ## Pull-request behavior
 

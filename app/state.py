@@ -35,6 +35,7 @@ class WorkflowState(TypedDict):
 
     workspace: str
     branch: str
+    workspace_audit: dict[str, Any]
 
     issue_baseline_sha: str
     remote_baseline_sha: str
@@ -66,6 +67,7 @@ class WorkflowState(TypedDict):
     coder_model: str
 
     environment_ready: bool
+    environment_started: bool
     environment_output: str
     cleanup_status: str
     cleanup_output: str

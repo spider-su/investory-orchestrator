@@ -487,6 +487,113 @@ def _configured_target_adapter() -> TargetAdapter:
     return _UnsupportedTargetAdapter(configured_adapter)
 
 
+def is_documentation_only_task(issue_body: str) -> bool:
+    normalized = " ".join(issue_body.casefold().split())
+    return (
+        "documentation changes only" in normalized
+        or "documentation-only" in normalized
+    ) and "do not run application tests" in normalized
+
+
+def run_documentation_validation(
+    workspace: Path,
+    *,
+    baseline_sha: str = "",
+) -> CommandResult:
+    """Validate documentation-only changes without starting app tests."""
+    baseline = baseline_sha or "HEAD"
+    check = _run(
+        ["git", "diff", "--check", baseline, "--"],
+        workspace=workspace,
+        timeout=30,
+    )
+    if check.kind != "completed":
+        return _environment_failure(
+            check,
+            "Could not run documentation whitespace validation:",
+        )
+    if check.exit_code:
+        return _result(
+            "project_validation_failure",
+            exit_code=check.exit_code,
+            output=(
+                "Documentation whitespace validation failed.\n"
+                f"{check.output}"
+            ),
+        )
+
+    changed = _run(
+        ["git", "diff", "--name-only", baseline, "--"],
+        workspace=workspace,
+        timeout=30,
+    )
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        workspace=workspace,
+        timeout=30,
+    )
+    if changed.kind != "completed" or changed.exit_code:
+        return _environment_failure(
+            changed,
+            "Could not inspect changed documentation paths:",
+        )
+    if untracked.kind != "completed" or untracked.exit_code:
+        return _environment_failure(
+            untracked,
+            "Could not inspect untracked workspace paths:",
+        )
+
+    changed_paths = (
+        changed.output.splitlines()
+        if changed.output != "(command produced no output)"
+        else []
+    )
+    untracked_paths = (
+        untracked.output.split("\0")
+        if untracked.output != "(command produced no output)"
+        else []
+    )
+    paths = sorted({
+        path.strip()
+        for path in [*changed_paths, *untracked_paths]
+        if path.strip()
+    })
+    documentation_extensions = {".md", ".mdx", ".rst", ".adoc", ".txt"}
+    non_documentation = [
+        path for path in paths
+        if Path(path).suffix.casefold() not in documentation_extensions
+    ]
+    if non_documentation:
+        return _result(
+            "project_validation_failure",
+            exit_code=1,
+            output=(
+                "Documentation-only scope contains non-documentation files: "
+                + ", ".join(non_documentation)
+            ),
+        )
+
+    status = _run(
+        ["git", "status", "--short", "--untracked-files=all"],
+        workspace=workspace,
+        timeout=30,
+    )
+    if status.kind != "completed" or status.exit_code:
+        return _environment_failure(
+            status,
+            "Could not capture final documentation worktree status:",
+        )
+    output = (
+        "Documentation-only validation passed. Application tests were skipped "
+        "as required by the issue.\n"
+        f"$ git diff --check {baseline}\npassed\n"
+        f"$ git status --short --untracked-files=all\n"
+        f"{status.output or '(clean)'}\n"
+        f"Changed paths: {', '.join(paths) if paths else '(none)'}"
+    )
+    return _result("success", exit_code=0, output=output)
+
+
 def start_environment(
     workspace: Path,
     issue_number: int,
@@ -500,7 +607,15 @@ def start_environment(
 def run_validation(
     workspace: Path,
     issue_number: int,
+    *,
+    issue_body: str = "",
+    baseline_sha: str = "",
 ) -> CommandResult:
+    if is_documentation_only_task(issue_body):
+        return run_documentation_validation(
+            workspace,
+            baseline_sha=baseline_sha,
+        )
     return _configured_target_adapter().run_validation(
         workspace,
         issue_number,

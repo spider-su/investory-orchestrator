@@ -139,6 +139,32 @@ class ReviewerTests(unittest.TestCase):
         self.assertIn("Do not report", kwargs["prompt"])
         self.assertIn("later planned steps as context", kwargs["prompt"])
 
+    def test_review_receives_orchestrator_evidence_and_coder_report(self) -> None:
+        with patch(
+            "app.agents.reviewer.run_structured_prompt",
+            return_value=build_review(),
+        ) as run_mock:
+            with patch("app.agents.reviewer._branch_diff", return_value="diff"):
+                review_implementation(
+                    workspace=self.workspace,
+                    issue_number=104,
+                    issue_title="Documentation",
+                    issue_body="Update docs.",
+                    plan={"current_step": {"id": "step-01"}},
+                    validation_output="Validation passed.",
+                    baseline_sha="step-baseline",
+                    coder_report={"summary": "Inventory complete."},
+                    workspace_audit={
+                        "branch": "agent/issue-104",
+                        "clean": True,
+                    },
+                )
+
+        prompt = run_mock.call_args.kwargs["prompt"]
+        self.assertIn("Inventory complete.", prompt)
+        self.assertIn('"clean": true', prompt)
+        self.assertIn("Do not demand historical evidence", prompt)
+
     def test_whole_plan_review_covers_all_steps(self) -> None:
         _, run_mock = self._run_review(
             build_review(),

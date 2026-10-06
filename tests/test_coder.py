@@ -66,6 +66,7 @@ class CoderTests(unittest.TestCase):
                     "status": "completed",
                     "summary": "Implemented tests for agents.",
                     "changes": ["tests/test_agents.py"],
+                    "evidence": ["Inspected the planner tests."],
                     "testsRun": [],
                     "remainingProblems": [],
                     "needsHumanInput": False,
@@ -93,6 +94,10 @@ class CoderTests(unittest.TestCase):
                         attempt=2,
                         max_attempts=3,
                         failed_patch_path="",
+                        workspace_audit={
+                            "branch": "agent/issue-42",
+                            "clean": True,
+                        },
                     )
 
         self.assertEqual(summary.summary, "Implemented tests for agents.")
@@ -111,10 +116,13 @@ class CoderTests(unittest.TestCase):
         self.assertIn("Implement GitHub issue #42", prompt)
         self.assertIn('"testsRun"', prompt)
         self.assertIn('"needsHumanInput"', prompt)
+        self.assertIn('"evidence"', prompt)
         self.assertIn("{'id': 'step-01', 'title': 'Add tests'}", prompt)
         self.assertIn("Previous validation failed.", prompt)
         self.assertIn("{'status': 'changes_required'}", prompt)
         self.assertIn("git diff text", prompt)
+        self.assertIn("Implement exactly the current implementation step", prompt)
+        self.assertIn('"branch": "agent/issue-42"', prompt)
         self.assertIn("Do not commit, push, or create a pull request.", prompt)
 
     def test_run_coder_wraps_timeout_output(self) -> None:

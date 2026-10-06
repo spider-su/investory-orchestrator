@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+from datetime import UTC, datetime
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -31,6 +32,32 @@ def _run(
         )
 
     return result.stdout
+
+
+def capture_workspace_audit(workspace: Path) -> dict[str, object]:
+    """Capture the checkout state before any planning or coding agents run."""
+    branch = _run(
+        ["git", "branch", "--show-current"],
+        cwd=workspace,
+    ).strip()
+    head_sha = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+    ).strip()
+    status = _run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=workspace,
+    ).strip()
+    return {
+        "captured_at": datetime.now(UTC).isoformat(),
+        "workspace": str(workspace.resolve()),
+        "workspace_kind": "dedicated task checkout",
+        "edits_confined_to_workspace": True,
+        "branch": branch,
+        "head_sha": head_sha,
+        "status_porcelain": status,
+        "clean": not status,
+    }
 
 
 def _git_environment(token: str) -> dict[str, str]:
