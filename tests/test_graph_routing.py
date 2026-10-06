@@ -338,6 +338,28 @@ class GraphRoutingTests(unittest.TestCase):
             "prepare_push_branch",
         )
 
+    def test_cleanup_resume_retries_cleanup_after_blocked_node(self) -> None:
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "blocked",
+                    "blocked_stage": "cleanup",
+                }
+            ),
+            "blocked",
+        )
+
+    def test_environment_resume_restarts_workspace_preparation(self) -> None:
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "blocked",
+                    "blocked_stage": "environment",
+                }
+            ),
+            "load_issue",
+        )
+
     def test_coder_resume_preserves_attempt_state(self) -> None:
         self.assertEqual(
             resolve_resume_from(

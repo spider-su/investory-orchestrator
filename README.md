@@ -3,18 +3,19 @@
 Investory Orchestrator turns queued GitHub issues or direct prompts into
 reviewed draft pull requests. Planner, coder, and reviewer roles run through
 the local Codex CLI; GitHub operations use a GitHub App. It coordinates
-deterministic validation, Git worktrees, GitHub Actions, repair loops, and a
-durable task queue backed by SQLite for local use or PostgreSQL for deployment.
+deterministic validation, isolated Git checkouts, GitHub Actions, repair loops,
+and a durable task queue backed by SQLite for local use or PostgreSQL for
+deployment.
 
 It does not merge pull requests automatically. Human review remains the final
 approval step.
 
 ## Current status
 
-The durable task lifecycle, queue controls, per-task worktrees, CI polling,
-bounded repair, and final review gates are implemented. Repeatable end-to-end
-verification against a live GitHub repository and unattended production use
-remain unverified.
+The k3s/devMac flow has been exercised on Issue #20 through repository
+validation and final independent review. That run stopped before PR publication
+because the existing branch had no new changes to commit. A complete PR
+lifecycle and unattended production use remain unverified.
 
 [`ROADMAP.md`](ROADMAP.md) is the authoritative source for implementation,
 verification, and production-readiness status.
@@ -30,7 +31,7 @@ setup are documented in [`docs/k3s-poc.md`](docs/k3s-poc.md).
 ```text
 GitHub issue or direct task prompt
 → persistent queued task
-→ isolated Git worktree and branch
+→ isolated Git checkout and branch
 → plan, implement, validate, review, repair
 → draft pull request
 → wait for GitHub Actions without holding a worker slot
@@ -71,7 +72,8 @@ By default, the SQLite task database and LangGraph checkpoints live under
 `./data`; set `DATABASE_URL` to use PostgreSQL for both.
 Each task receives `workspaces/task-<id>` or `workspaces/issue-<number>` and a
 separate branch. A shared bare repository cache under `workspaces/.repositories`
-backs linked Git worktrees. `--run-queue --once` runs one queue pass for
+backs independent local clones so Dev Containers receive the checkout's Git
+metadata. `--run-queue --once` runs one queue pass for
 supervised operation. The default queue keeps polling until stopped.
 
 Set `BASE_BRANCH` to the target repository's base branch. Resource defaults are

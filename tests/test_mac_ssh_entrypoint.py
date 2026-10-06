@@ -5,9 +5,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.mac_ssh_entrypoint import _lock_path, _probe, _run
+from scripts.mac_ssh_entrypoint import (
+    _ensure_node_on_path,
+    _lock_path,
+    _probe,
+    _run,
+)
 
 
 class MacSshEntrypointTests(unittest.TestCase):
@@ -19,6 +25,9 @@ class MacSshEntrypointTests(unittest.TestCase):
                     {
                         "MAC_RUNNER_LOCK_DIR": directory,
                         "MAC_CLI_PYTHON": "/repo/.venv/bin/python",
+                        "MAC_WORKSPACES_DIR": f"{directory}/mac-workspaces",
+                        "MAC_RUNS_DIR": f"{directory}/mac-runs",
+                        "WORKSPACES_DIR": "/app/workspaces",
                     },
                     clear=False,
                 ),
@@ -31,6 +40,71 @@ class MacSshEntrypointTests(unittest.TestCase):
             ["/repo/.venv/bin/python", "-m", "app", "--task-id", "spider-su/investory#20", "--issue", "20", "--resume"],
         )
         self.assertEqual(call.call_args.kwargs["env"]["BASE_BRANCH"], "develop")
+        self.assertEqual(
+            call.call_args.kwargs["env"]["WORKSPACES_DIR"],
+            f"{directory}/mac-workspaces",
+        )
+        self.assertEqual(
+            call.call_args.kwargs["env"]["RUNS_DIR"],
+            f"{directory}/mac-runs",
+        )
+
+    def test_workspace_directory_defaults_to_writable_mac_home_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "MAC_RUNNER_LOCK_DIR": directory,
+                        "HOME": directory,
+                        "WORKSPACES_DIR": "/app/workspaces",
+                    },
+                    clear=False,
+                ),
+                patch.dict(os.environ, {"MAC_WORKSPACES_DIR": ""}, clear=False),
+                patch("scripts.mac_ssh_entrypoint.subprocess.call", return_value=0) as call,
+            ):
+                os.environ.pop("MAC_WORKSPACES_DIR", None)
+                self.assertEqual(
+                    _run(["run", "abcdef123456", "20", "develop", "0", "0"]),
+                    0,
+                )
+
+        self.assertEqual(
+            call.call_args.kwargs["env"]["WORKSPACES_DIR"],
+            f"{directory}/.investory-orchestrator/task-workspaces",
+        )
+        self.assertEqual(
+            call.call_args.kwargs["env"]["RUNS_DIR"],
+            f"{directory}/.investory-orchestrator/runs",
+        )
+
+    def test_resolves_default_nvm_node_when_not_on_ssh_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            nvm_script = home / ".nvm" / "nvm.sh"
+            nvm_script.parent.mkdir(parents=True)
+            nvm_script.touch()
+            environment = {"HOME": directory, "PATH": "/usr/bin"}
+            with (
+                patch("scripts.mac_ssh_entrypoint.Path.home", return_value=home),
+                patch("scripts.mac_ssh_entrypoint.shutil.which", return_value=None),
+                patch(
+                    "scripts.mac_ssh_entrypoint.subprocess.run",
+                    return_value=SimpleNamespace(
+                        returncode=0,
+                        stdout=f"{directory}/.nvm/versions/node/v24.0.0/bin/node\n",
+                        stderr="",
+                    ),
+                ) as run_mock,
+            ):
+                _ensure_node_on_path(environment)
+
+        self.assertEqual(
+            environment["PATH"],
+            f"{directory}/.nvm/versions/node/v24.0.0/bin:/usr/bin",
+        )
+        run_mock.assert_called_once()
 
     def test_probe_reports_active_lock_and_rejects_invalid_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
