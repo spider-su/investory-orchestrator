@@ -154,10 +154,11 @@ def _print_task(task: Any) -> None:
             else ""
         )
     )
-    if task.status == TaskStatus.READY:
+    if task.status in {TaskStatus.READY, TaskStatus.COMPLETED}:
         metadata = task.metadata
         plan = metadata.get("plan", {})
         review = metadata.get("final_review", {})
+    if task.status == TaskStatus.READY:
         print(f"PR: {task.pr_url}")
         print(
             f"CI: {task.ci_status} "
@@ -204,7 +205,7 @@ def _print_task(task: Any) -> None:
             print("Remaining risks:")
             for problem in remaining:
                 print(f"- {problem}")
-        print("Human action: review and merge the draft PR.")
+        print("Task completed after human merge and successful post-merge CI.")
     elif task.status == TaskStatus.BLOCKED:
         print(f"Blocked: {task.blocked_reason}")
         details = task.metadata.get("ci_details", [])

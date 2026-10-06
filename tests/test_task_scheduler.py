@@ -68,6 +68,38 @@ class TaskSchedulerTests(unittest.TestCase):
             _print_task(task)
         self.assertNotIn("old failure", output.getvalue())
 
+    def test_completed_task_status_prints_merge_summary(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        task = SimpleNamespace(
+            task_id="spider-su/investory#104",
+            status=TaskStatus.COMPLETED,
+            title="Completed task",
+            pr_number=105,
+            pr_url="https://github.com/spider-su/investory/pull/105",
+            ci_status="green",
+            blocked_reason="",
+            metadata={
+                "completion": {
+                    "merge_commit_sha": "a" * 40,
+                    "merged_by": "spider-su",
+                    "issue_closed": True,
+                },
+                "plan": {},
+                "final_review": {},
+            },
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_task(task)
+
+        self.assertIn("COMPLETED", output.getvalue())
+        self.assertIn("Merged by: spider-su", output.getvalue())
+        self.assertIn("Issue closed: True", output.getvalue())
+        self.assertIn("Task completed after human merge", output.getvalue())
+        self.assertNotIn("Human action:", output.getvalue())
+
     def test_remote_worker_command_uses_quoted_configured_mac_paths(self) -> None:
         task = self.store.create(title="remote", issue_number=42)
         with patch.dict(
