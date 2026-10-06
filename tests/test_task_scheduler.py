@@ -8,11 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.task_scheduler import (
+    _print_task,
     _poll_ci,
     _notify_terminal_tasks,
     _remote_worker_command,
     _remote_worker_is_running,
     _sync_task_result,
+    _track_task_state,
     run_queue,
 )
 from app.tasks import TaskStatus, TaskStore
@@ -25,6 +27,45 @@ class TaskSchedulerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_resuming_status_clears_stale_blocked_details(self) -> None:
+        task = self.store.create(title="resume", issue_number=104)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED,
+            expected=TaskStatus.QUEUED,
+            blocked_reason="old failure",
+            metadata={"blocked_stage": "complete_step"},
+        )
+
+        _track_task_state(self.store, task.task_id, TaskStatus.IMPLEMENTING)
+        current = self.store.get(task.task_id)
+
+        self.assertEqual(current.status, TaskStatus.IMPLEMENTING)
+        self.assertEqual(current.blocked_reason, "")
+        self.assertNotIn("blocked_stage", current.metadata)
+
+    def test_task_output_hides_block_reason_after_recovery(self) -> None:
+        task = self.store.create(title="resume", issue_number=105)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED,
+            expected=TaskStatus.QUEUED,
+            blocked_reason="old failure",
+        )
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.IMPLEMENTING,
+            expected=TaskStatus.BLOCKED,
+        )
+
+        from io import StringIO
+        from contextlib import redirect_stdout
+
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_task(task)
+        self.assertNotIn("old failure", output.getvalue())
 
     def test_remote_worker_command_uses_quoted_configured_mac_paths(self) -> None:
         task = self.store.create(title="remote", issue_number=42)

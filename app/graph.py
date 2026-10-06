@@ -44,12 +44,15 @@ from app.side_effects import (
 )
 from app.state import WorkflowState
 from app.test_runner import (
+    is_documentation_only_task,
     run_validation,
     start_environment,
     stop_environment,
 )
 from app.workspace import (
+    capture_workspace_audit,
     commit_step,
+    concrete_affected_paths,
     finalize_checkpoint_history,
     prepare_workspace,
     push_branch,
@@ -304,7 +307,7 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "prepare_review_comment": "prepare_review_comment",
         "publish_review": "publish_review",
         "prepare_checkpoint": "prepare_checkpoint",
-        "complete_step": "complete_step",
+        "complete_step": "prepare_checkpoint",
         "prepare_final_review": "complete_step",
         "final_integration_coder": "prepare_final_review",
         "final_reviewer": "final_validation",
@@ -398,6 +401,7 @@ def prepare_workspace_node(state: WorkflowState) -> dict:
     )
     remote_baseline_sha = client.get_branch_head_sha(branch) or ""
     local_head_sha = current_head(workspace)
+    workspace_audit = capture_workspace_audit(workspace)
 
     if remote_baseline_sha and local_head_sha != remote_baseline_sha:
         raise RuntimeError(
@@ -421,6 +425,7 @@ def prepare_workspace_node(state: WorkflowState) -> dict:
     return {
         "workspace": str(workspace),
         "branch": branch,
+        "workspace_audit": workspace_audit,
         "issue_baseline_sha": issue_baseline_sha,
         "remote_baseline_sha": remote_baseline_sha,
     }
@@ -440,6 +445,25 @@ def collect_repository_context_node(
 
 
 def start_environment_node(state: WorkflowState) -> dict:
+    if is_documentation_only_task(state.get("issue_body", "")):
+        message = (
+            "Skipped Dev Container startup for documentation-only task; "
+            "application tests are prohibited by the issue."
+        )
+        print(message)
+        return {
+            "environment_ready": True,
+            "environment_started": False,
+            "environment_output": message,
+            "cleanup_status": "success",
+            "cleanup_output": message,
+            "cleanup_resume_stage": "",
+            "cleanup_resume_reason": "",
+            "validation_status": "not_started",
+            "validation_exit_code": 0,
+            "error": "",
+        }
+
     print("Starting Dev Container environment")
 
     result = start_environment(
@@ -452,6 +476,7 @@ def start_environment_node(state: WorkflowState) -> dict:
 
         return {
             "environment_ready": True,
+            "environment_started": True,
             "environment_output": result["output"],
             "cleanup_status": "not_started",
             "cleanup_output": "",
@@ -466,6 +491,7 @@ def start_environment_node(state: WorkflowState) -> dict:
 
     return {
         "environment_ready": False,
+        "environment_started": False,
         "environment_output": result["output"],
         "cleanup_status": "not_started",
         "cleanup_output": "",
@@ -561,6 +587,7 @@ def coder_node(state: WorkflowState) -> dict:
             attempt=next_attempt,
             max_attempts=state["max_attempts"],
             failed_patch_path=state.get("last_failed_patch_path", ""),
+            workspace_audit=state.get("workspace_audit", {}),
         )
     except CoderError as error:
         message = str(error)
@@ -676,6 +703,8 @@ def run_validation_node(state: WorkflowState) -> dict:
     result = run_validation(
         Path(state["workspace"]),
         state["issue_number"],
+        issue_body=state.get("issue_body", ""),
+        baseline_sha=state.get("step_baseline_sha", ""),
     )
 
     if result["success"]:
@@ -830,10 +859,16 @@ def cleanup_node(state: WorkflowState) -> dict:
     print("Stopping Dev Container environment")
 
     try:
-        result = stop_environment(
-            Path(state["workspace"]),
-            state["issue_number"],
-        )
+        if state.get("environment_started", True):
+            result = stop_environment(
+                Path(state["workspace"]),
+                state["issue_number"],
+            )
+        else:
+            result = {
+                "success": True,
+                "output": "No Dev Container was started for this task.",
+            }
     except RuntimeError as error:
         result = {
             "success": False,
@@ -938,6 +973,9 @@ def reviewer_node(state: WorkflowState) -> dict:
                 "current_step": step,
             },
             validation_output=state["test_output"],
+            baseline_sha=state.get("step_baseline_sha", ""),
+            coder_report=state.get("coder_report", {}),
+            workspace_audit=state.get("workspace_audit", {}),
         )
     except ReviewerError as error:
         message = str(error)
@@ -1156,6 +1194,15 @@ def complete_step_node(state: WorkflowState) -> dict:
         }
 
     try:
+        allowed_paths = concrete_affected_paths(
+            Path(state["workspace"]),
+            step.get("affected_areas", []),
+        )
+        if not allowed_paths:
+            print(
+                "Plan affected areas are descriptive; review findings will "
+                "enforce the step's file scope."
+            )
         commit_sha = commit_step(
             Path(state["workspace"]),
             step["id"],
@@ -1166,7 +1213,7 @@ def complete_step_node(state: WorkflowState) -> dict:
                 or None
             ),
             operation_id=intent.get("operation_id"),
-            allowed_paths=step.get("affected_areas", []),
+            allowed_paths=allowed_paths,
         )
     except RuntimeError as error:
         message = str(error)
@@ -1276,6 +1323,8 @@ def final_validation_node(state: WorkflowState) -> dict:
     result = run_validation(
         Path(state["workspace"]),
         state["issue_number"],
+        issue_body=state.get("issue_body", ""),
+        baseline_sha=state.get("final_baseline_sha", ""),
     )
 
     if result["success"]:
@@ -1378,6 +1427,7 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
                 "last_failed_final_patch_path",
                 "",
             ),
+            workspace_audit=state.get("workspace_audit", {}),
         )
     except CoderError as error:
         message = str(error)
@@ -1487,6 +1537,8 @@ def final_reviewer_node(state: WorkflowState) -> dict:
             validation_output=state["final_validation_output"],
             review_scope="whole_plan",
             baseline_sha=state["issue_baseline_sha"],
+            coder_report=state.get("coder_report", {}),
+            workspace_audit=state.get("workspace_audit", {}),
         )
     except ReviewerError as error:
         message = str(error)

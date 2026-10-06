@@ -151,6 +151,7 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                     stack.enter_context(patch("app.graph.GitHubAppClient", return_value=github))
                     stack.enter_context(patch("app.github_client.GitHubAppClient", return_value=github))
                     stack.enter_context(patch("app.graph.prepare_workspace", return_value=(workspace, "agent/issue-42")))
+                    stack.enter_context(patch("app.graph.capture_workspace_audit", return_value={"branch": "agent/issue-42", "clean": True}))
                     stack.enter_context(patch("app.graph.collect_repository_context", return_value="fixture context"))
                     stack.enter_context(patch("app.graph.create_plan", return_value=plan))
                     stack.enter_context(patch("app.graph.start_environment", return_value={"success": True, "exit_code": 0, "output": "ready"}))

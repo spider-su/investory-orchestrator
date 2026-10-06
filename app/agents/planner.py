@@ -102,8 +102,14 @@ Planning rules:
 - Add open questions only when implementation would otherwise be unsafe or
   materially ambiguous.
 - Prefer small steps that can be implemented and validated independently.
+- Keep issue-required evidence gathering as a separate read-only step when it
+  must happen before edits. State explicitly that the workspace must remain
+  unchanged and identify the evidence to report.
 - Every step must have concrete acceptance criteria.
 - Every step must specify how it will be validated.
+- List exact repository-relative files or directories in affected areas; do
+  not use narrative labels as if they were filesystem paths. Use an empty list
+  when affected paths cannot yet be named.
 - Do not include branch creation, commits, pushes, or pull requests as steps.
 - Do not include enhancements outside the issue scope.
 - Order steps according to dependencies.

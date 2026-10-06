@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -205,6 +206,8 @@ def review_implementation(
     validation_output: str,
     review_scope: ReviewScope = "step",
     baseline_sha: str | None = None,
+    coder_report: dict | None = None,
+    workspace_audit: dict | None = None,
 ) -> ReviewResult:
     scope_rules = (
         """
@@ -245,6 +248,14 @@ Issue body:
 Approved implementation plan:
 {plan}
 
+Coder report (agent-authored, corroborate it against the diff and validation):
+{json.dumps(coder_report or {}, indent=2, sort_keys=True)}
+
+Orchestrator-captured initial workspace audit (captured before planning or
+agent edits; authoritative for the original branch, commit, and initial
+tracked/untracked status):
+{json.dumps(workspace_audit or {}, indent=2, sort_keys=True)}
+
 Validation output:
 {validation_output or "No validation output was supplied."}
 
@@ -257,6 +268,11 @@ Review scope:
 Review rules:
 {scope_rules}
 - Review only against the issue and approved plan.
+- Review only the active implementation step. Work assigned to later steps
+  is out of scope until those steps are active.
+- Use the orchestrator-captured workspace audit to verify initial checkout
+  status and preservation claims. Do not demand historical evidence that the
+  orchestrator captured directly before any agent ran.
 - Verify acceptance criteria for the active review scope. For a step review,
   assess the current step only; for a whole-plan review, assess the issue and
   all plan steps.

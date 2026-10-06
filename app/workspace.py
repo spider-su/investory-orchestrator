@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+from datetime import UTC, datetime
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -31,6 +32,53 @@ def _run(
         )
 
     return result.stdout
+
+
+def capture_workspace_audit(workspace: Path) -> dict[str, object]:
+    """Capture the checkout state before any planning or coding agents run."""
+    branch = _run(
+        ["git", "branch", "--show-current"],
+        cwd=workspace,
+    ).strip()
+    head_sha = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace,
+    ).strip()
+    status = _run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=workspace,
+    ).strip()
+    return {
+        "captured_at": datetime.now(UTC).isoformat(),
+        "workspace": str(workspace.resolve()),
+        "workspace_kind": "dedicated task checkout",
+        "edits_confined_to_workspace": True,
+        "branch": branch,
+        "head_sha": head_sha,
+        "status_porcelain": status,
+        "clean": not status,
+    }
+
+
+def concrete_affected_paths(
+    workspace: Path,
+    affected_areas: Iterable[str],
+) -> list[str] | None:
+    """Return machine-checkable plan paths, ignoring narrative descriptions."""
+    paths: list[str] = []
+    for area in affected_areas:
+        value = str(area).strip().strip("`").rstrip("/")
+        if not value:
+            continue
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            continue
+        if (workspace / path).exists() or (
+            not any(character.isspace() for character in value)
+            and ("/" in value or path.suffix)
+        ):
+            paths.append(path.as_posix())
+    return paths or None
 
 
 def _git_environment(token: str) -> dict[str, str]:

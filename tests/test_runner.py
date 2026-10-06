@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -219,6 +220,70 @@ class TestRunnerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "environment_failure")
         self.assertIn("Unsupported target adapter", result["output"])
+
+    def test_documentation_only_issue_skips_application_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            subprocess.run(["git", "init", "-b", "develop"], cwd=workspace, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=workspace, check=True)
+            readme = workspace / "README.md"
+            readme.write_text("Initial\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+            subprocess.run(["git", "commit", "-m", "baseline"], cwd=workspace, check=True, capture_output=True)
+            baseline = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            readme.write_text("Updated docs\n", encoding="utf-8")
+
+            issue_body = (
+                "Make documentation changes only. "
+                "Do not run application tests; this task is documentation-only."
+            )
+            with patch("app.test_runner._configured_target_adapter") as adapter:
+                result = run_validation(
+                    workspace,
+                    104,
+                    issue_body=issue_body,
+                    baseline_sha=baseline,
+                )
+
+        self.assertTrue(result["success"])
+        self.assertIn("Application tests were skipped", result["output"])
+        adapter.assert_not_called()
+
+    def test_documentation_only_validation_rejects_application_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            subprocess.run(["git", "init", "-b", "develop"], cwd=workspace, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=workspace, check=True)
+            source = workspace / "app.py"
+            source.write_text("print('initial')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=workspace, check=True)
+            subprocess.run(["git", "commit", "-m", "baseline"], cwd=workspace, check=True, capture_output=True)
+            baseline = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            source.write_text("print('changed')\n", encoding="utf-8")
+
+            result = run_validation(
+                workspace,
+                104,
+                issue_body=(
+                    "Make documentation changes only. "
+                    "Do not run application tests."
+                ),
+                baseline_sha=baseline,
+            )
+
+        self.assertFalse(result["success"])
+        self.assertIn("non-documentation files: app.py", result["output"])
 
     def test_run_limits_command_output(self) -> None:
         _, output = _run(

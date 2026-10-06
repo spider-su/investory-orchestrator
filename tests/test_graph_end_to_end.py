@@ -250,6 +250,12 @@ class GraphEndToEndTests(unittest.TestCase):
                 stack.enter_context(
                     patch("app.graph.current_head", return_value="baseline-sha")
                 )
+                stack.enter_context(
+                    patch(
+                        "app.graph.capture_workspace_audit",
+                        return_value={"branch": "agent/issue-42", "clean": True},
+                    )
+                )
                 checkpoint_mock = stack.enter_context(
                     patch("app.graph.commit_step", return_value="checkpoint-sha")
                 )

@@ -15,6 +15,7 @@ from app.graph import (
     push_branch_node,
     resolve_resume_from,
     route_after_validation,
+    start_environment_node,
     run_validation_node,
 )
 from app.agents.coder import CoderError
@@ -106,6 +107,37 @@ class FakeGitHubClient:
 
 
 class GraphCompletionTests(unittest.TestCase):
+    def test_documentation_only_task_skips_container_start(self) -> None:
+        state = {
+            "issue_body": (
+                "Make documentation changes only. "
+                "Do not run application tests; documentation-only."
+            )
+        }
+
+        with patch("app.graph.start_environment") as start_mock:
+            result = start_environment_node(state)
+
+        self.assertTrue(result["environment_ready"])
+        self.assertFalse(result["environment_started"])
+        self.assertIn("application tests are prohibited", result["environment_output"])
+        start_mock.assert_not_called()
+
+    def test_cleanup_does_not_stop_container_that_was_not_started(self) -> None:
+        state = {
+            "workspace": "/tmp/unused-workspace",
+            "issue_number": 104,
+            "environment_started": False,
+            "cleanup_resume_stage": "",
+            "pull_request_number": 0,
+        }
+
+        with patch("app.graph.stop_environment") as stop_mock:
+            result = cleanup_node(state)
+
+        self.assertEqual(result["cleanup_status"], "success")
+        stop_mock.assert_not_called()
+
     def test_coder_failure_persists_consumed_attempt(self) -> None:
         state = {
             "issue_number": 42,

@@ -20,6 +20,13 @@ class CoderReport(BaseModel):
     status: Literal["completed", "needs_human_input"]
     summary: str
     changes: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Concrete files, commands, and observations supporting the work "
+            "in the current step."
+        ),
+    )
     tests_run: list[str] = Field(default_factory=list, alias="testsRun")
     remaining_problems: list[str] = Field(
         default_factory=list,
@@ -90,6 +97,7 @@ def run_coder(
     attempt: int,
     max_attempts: int,
     failed_patch_path: str,
+    workspace_audit: dict | None = None,
 ) -> CoderReport:
     task_reference = (
         f"task {abs(issue_number)}"
@@ -107,6 +115,11 @@ Description:
 
 Current implementation step:
 {step}
+
+Orchestrator-captured initial workspace audit (captured before planning or
+agent edits; authoritative for initial branch, commit, and tracked/untracked
+status):
+{json.dumps(workspace_audit or {}, indent=2, sort_keys=True)}
 
 Attempt:
 {attempt} of {max_attempts}
@@ -126,6 +139,11 @@ Previous failed attempt patch (diagnostic context only):
 Do not reapply the failed patch blindly. Produce a fresh candidate from the clean step baseline.
 
 Instructions:
+- Implement exactly the current implementation step above. Do not implement
+  requirements assigned to later steps, even when they are visible in the
+  issue or plan.
+- If the current step is inspection or inventory only, make no workspace
+  changes and report concrete evidence in `evidence`.
 - Inspect AGENTS.md and repository documentation before editing.
 - Implement only this issue.
 - Make the smallest correct change.
@@ -142,6 +160,7 @@ Return a JSON object matching this contract:
   "status": "completed" or "needs_human_input",
   "summary": "concise implementation summary",
   "changes": ["files or behavior changed"],
+  "evidence": ["files inspected, commands run, and observations for this step"],
   "testsRun": ["commands actually run by the coder, or an empty list"],
   "remainingProblems": ["unresolved implementation problems"],
   "needsHumanInput": false
