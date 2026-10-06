@@ -37,6 +37,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         docker-ce-cli \
         docker-compose-plugin \
+        libpcre2-8-0 \
     && npm install -g \
         @devcontainers/cli \
         @openai/codex \
@@ -56,7 +57,13 @@ RUN chmod 0755 /usr/libexec/docker/cli-plugins/docker-buildx \
 
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --upgrade 'pip' \
-    && python -m pip install --no-cache-dir -r requirements.txt
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && rm -rf \
+        /usr/local/lib/python3.13/site-packages/pip \
+        /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.13
 
 COPY . .
 COPY scripts/orchestrator-entrypoint.sh /usr/local/bin/orchestrator-entrypoint
