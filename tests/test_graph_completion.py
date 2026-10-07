@@ -280,6 +280,22 @@ class GraphCompletionTests(unittest.TestCase):
                     "commit_sha": None,
                 }
             ],
+            "coder_report": {
+                "summary": "No safe cleanup candidates found.",
+                "changes": [],
+                "evidence": ["Reviewed runtime wiring."],
+                "testsRun": [],
+                "remainingProblems": [],
+            },
+            "validation_status": "validation_success",
+            "validation_exit_code": 0,
+            "review": {
+                "status": "approved",
+                "summary": "The audit meets its acceptance criteria.",
+                "requirements_satisfied": ["Audit is evidence-based."],
+                "missing_requirements": [],
+                "findings": [],
+            },
         }
 
         with patch("app.graph.commit_step", return_value=None):
@@ -291,6 +307,22 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertEqual(result["steps"][0]["status"], "completed")
         self.assertEqual(result["steps"][0]["attempts"], 2)
         self.assertEqual(result["steps"][0]["commit_sha"], None)
+        self.assertEqual(
+            result["steps"][0]["result"]["coder"]["summary"],
+            "No safe cleanup candidates found.",
+        )
+        self.assertEqual(
+            result["steps"][0]["result"]["coder"]["evidence"],
+            ["Reviewed runtime wiring."],
+        )
+        self.assertEqual(
+            result["steps"][0]["result"]["validation"]["status"],
+            "validation_success",
+        )
+        self.assertEqual(
+            result["steps"][0]["result"]["review"]["status"],
+            "approved",
+        )
 
     def test_github_client_normalizes_pr_update_error(self) -> None:
         client = GitHubAppClient.__new__(GitHubAppClient)

@@ -582,6 +582,9 @@ def coder_node(state: WorkflowState) -> dict:
             issue_title=state["issue_title"],
             issue_body=state["issue_body"],
             step=step,
+            completed_step_results=_completed_step_results(
+                state.get("steps", [])
+            ),
             validation_output=state["test_output"],
             review_feedback=state["review"],
             attempt=next_attempt,
@@ -1227,6 +1230,37 @@ def complete_step_node(state: WorkflowState) -> dict:
     step["status"] = "completed"
     step["attempts"] = state["attempt"]
     step["commit_sha"] = commit_sha
+    coder_report = state.get("coder_report", {})
+    review = state.get("review", {})
+    step["result"] = {
+        "coder": {
+            key: coder_report.get(key)
+            for key in (
+                "status",
+                "summary",
+                "changes",
+                "evidence",
+                "testsRun",
+                "remainingProblems",
+            )
+            if key in coder_report
+        },
+        "validation": {
+            "status": state.get("validation_status", ""),
+            "exit_code": state.get("validation_exit_code", 0),
+        },
+        "review": {
+            key: review.get(key)
+            for key in (
+                "status",
+                "summary",
+                "requirements_satisfied",
+                "missing_requirements",
+                "findings",
+            )
+            if key in review
+        },
+    }
 
     if commit_sha is None:
         print(
@@ -1261,6 +1295,18 @@ def complete_step_node(state: WorkflowState) -> dict:
             else list(state.get("side_effect_history", []))
         ),
     }
+
+
+def _completed_step_results(steps: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": step.get("id", ""),
+            "title": step.get("title", ""),
+            **step.get("result", {}),
+        }
+        for step in steps
+        if step.get("status") == "completed" and step.get("result")
+    ]
 
 
 def route_after_step_completion(state: WorkflowState) -> str:
@@ -1419,6 +1465,9 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
             issue_title=state["issue_title"],
             issue_body=state["issue_body"],
             step=integration_step,
+            completed_step_results=_completed_step_results(
+                state.get("steps", [])
+            ),
             validation_output=state["final_validation_output"],
             review_feedback=state["final_review"],
             attempt=next_attempt,

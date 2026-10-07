@@ -89,6 +89,16 @@ class CoderTests(unittest.TestCase):
                         issue_title="Add tests for agents",
                         issue_body="Cover planner, coder, and reviewer.",
                         step={"id": "step-01", "title": "Add tests"},
+                        completed_step_results=[
+                            {
+                                "id": "step-01",
+                                "title": "Gather evidence",
+                                "coder": {
+                                    "summary": "No safe cleanup candidates found.",
+                                    "evidence": ["Reviewed runtime wiring."],
+                                },
+                            }
+                        ],
                         validation_output="Previous validation failed.",
                         review_feedback={"status": "changes_required"},
                         attempt=2,
@@ -122,6 +132,9 @@ class CoderTests(unittest.TestCase):
         self.assertIn("{'status': 'changes_required'}", prompt)
         self.assertIn("git diff text", prompt)
         self.assertIn("Implement exactly the current implementation step", prompt)
+        self.assertIn("No safe cleanup candidates found.", prompt)
+        self.assertIn("Reviewed runtime wiring.", prompt)
+        self.assertIn("no-op can satisfy the step", prompt)
         self.assertIn('"branch": "agent/issue-42"', prompt)
         self.assertIn("Do not commit, push, or create a pull request.", prompt)
 
