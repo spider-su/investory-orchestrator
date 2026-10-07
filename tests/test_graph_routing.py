@@ -12,6 +12,7 @@ from app.graph import (
     route_after_final_reviewer,
     route_after_final_validation,
     route_after_finalize_history,
+    route_after_workflow_complete,
     route_after_plan_publication,
     route_after_planner,
     route_after_prepare_draft_pr,
@@ -283,6 +284,16 @@ class GraphRoutingTests(unittest.TestCase):
             "workflow_complete",
         )
 
+    def test_workflow_complete_skips_pr_for_approved_no_change_outcome(self) -> None:
+        self.assertEqual(
+            route_after_workflow_complete({"no_change_outcome": True}),
+            "cleanup",
+        )
+        self.assertEqual(
+            route_after_workflow_complete({"no_change_outcome": False}),
+            "prepare_push_branch",
+        )
+
     def test_route_after_prepare_push_branch(self) -> None:
         self.assertEqual(
             route_after_prepare_push_branch({"workflow_status": "blocked"}),
@@ -360,7 +371,7 @@ class GraphRoutingTests(unittest.TestCase):
             "load_issue",
         )
 
-    def test_coder_resume_preserves_attempt_state(self) -> None:
+    def test_coder_resume_restarts_environment_before_coder(self) -> None:
         self.assertEqual(
             resolve_resume_from(
                 {
@@ -368,7 +379,7 @@ class GraphRoutingTests(unittest.TestCase):
                     "blocked_stage": "coder",
                 }
             ),
-            "prepare_current_step",
+            "resume_environment",
         )
         self.assertEqual(
             resolve_resume_from(
@@ -393,6 +404,27 @@ class GraphRoutingTests(unittest.TestCase):
                 }
             ),
             "prepare_checkpoint",
+        )
+
+    def test_finalization_resume_retries_finalizer_after_intent_preparation(self) -> None:
+        self.assertEqual(
+            resolve_resume_from(
+                {"workflow_status": "blocked", "blocked_stage": "finalize_history"}
+            ),
+            "prepare_finalize_history",
+        )
+        self.assertEqual(
+            resolve_resume_from(
+                {
+                    "workflow_status": "publishing",
+                    "side_effect_intent": {
+                        "kind": "finalization",
+                        "status": "prepared",
+                        "operation_id": "issue-42:finalize",
+                    },
+                }
+            ),
+            "prepare_finalize_history",
         )
 
 

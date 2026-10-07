@@ -300,9 +300,8 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "environment": "load_issue",
         "prepare_plan_comment": "prepare_plan_comment",
         "publish_plan": "publish_plan",
-        # Set the checkpoint as if preparation completed so LangGraph's next
-        # edge starts at coder without executing preparation a second time.
-        "coder": "prepare_current_step",
+        # Restart the target environment, then prepare the current coder step.
+        "coder": "resume_environment",
         "reviewer": "run_validation",
         "prepare_review_comment": "prepare_review_comment",
         "publish_review": "publish_review",
@@ -312,7 +311,9 @@ def resume_from_for_stage(blocked_stage: str) -> str | None:
         "final_integration_coder": "prepare_final_review",
         "final_reviewer": "final_validation",
         "prepare_finalize_history": "prepare_finalize_history",
-        "finalize_history": "finalize_history",
+        # Retry the finalizer after idempotent intent preparation; update_state
+        # anchors after the node supplied as `as_node`.
+        "finalize_history": "prepare_finalize_history",
         "prepare_push_branch": "workflow_complete",
         # `update_state(..., as_node=...)` resumes after the named node, so
         # anchor at preparation to execute the push node again.
@@ -345,7 +346,7 @@ def resolve_resume_from(state: dict) -> str:
         resume_from = {
             "issue_comment": intent.get("resume_node"),
             "checkpoint": "complete_step",
-            "finalization": "finalize_history",
+            "finalization": "prepare_finalize_history",
             "push_branch": "prepare_push_branch",
             "draft_pr_upsert": "prepare_draft_pr",
         }.get(intent.get("kind"))
@@ -500,6 +501,55 @@ def start_environment_node(state: WorkflowState) -> dict:
         "validation_status": "environment_failure",
         "validation_exit_code": result["exit_code"],
         "error": result["output"],
+    }
+
+
+def resume_environment_node(state: WorkflowState) -> dict:
+    """Restart target services before resuming a coder-stage checkpoint."""
+    if is_documentation_only_task(state.get("issue_body", "")):
+        message = (
+            "Skipped Dev Container startup for documentation-only task; "
+            "application tests are prohibited by the issue."
+        )
+        print(message)
+        return {
+            "environment_ready": True,
+            "environment_started": False,
+            "environment_output": message,
+            "cleanup_status": "success",
+            "cleanup_output": message,
+            "validation_status": "not_started",
+            "validation_exit_code": 0,
+            "error": "",
+        }
+    print("Restarting Dev Container environment for checkpoint resume")
+    result = start_environment(Path(state["workspace"]), state["issue_number"])
+    if result["success"]:
+        print("Environment ready")
+        return {
+            "environment_ready": True,
+            "environment_started": True,
+            "environment_output": result["output"],
+            "cleanup_status": "not_started",
+            "cleanup_output": "",
+            "cleanup_resume_stage": "",
+            "cleanup_resume_reason": "",
+            "validation_status": "not_started",
+            "validation_exit_code": 0,
+            "error": "",
+        }
+    print("Environment setup failed")
+    return {
+        "environment_ready": False,
+        "environment_started": False,
+        "environment_output": result["output"],
+        "cleanup_status": "not_started",
+        "cleanup_output": "",
+        "validation_status": "environment_failure",
+        "validation_exit_code": result["exit_code"],
+        "blocked_reason": result["output"],
+        "blocked_stage": "environment",
+        "error": "",
     }
 
 
@@ -917,6 +967,15 @@ def cleanup_node(state: WorkflowState) -> dict:
             }
         )
     elif state.get("pull_request_number"):
+        result_state.update(
+            {
+                "workflow_status": "completed",
+                "blocked_stage": "",
+                "blocked_reason": "",
+                "error": "",
+            }
+        )
+    elif state.get("no_change_outcome"):
         result_state.update(
             {
                 "workflow_status": "completed",
@@ -1799,6 +1858,28 @@ def finalize_history_node(state: WorkflowState) -> dict:
             allowed_paths=_approved_paths_for_steps(state["steps"]),
         )
     except RuntimeError as error:
+        if (
+            str(error) == "No implementation changes remain for final commit."
+            and state.get("final_review_status") == "approved"
+            and state.get("final_validation_status") == "validation_success"
+            and not workspace_has_changes(Path(state["workspace"]))
+        ):
+            completed_history = complete_intent(
+                intent,
+                list(state.get("side_effect_history", [])),
+                outcome="no_changes",
+                head_sha=state.get("final_baseline_sha", ""),
+            )
+            print("No implementation changes were warranted; completing without a PR")
+            return {
+                "workflow_status": "completed",
+                "no_change_outcome": True,
+                "side_effect_intent": {},
+                "side_effect_history": completed_history,
+                "blocked_reason": "",
+                "blocked_stage": "",
+                "error": "",
+            }
         message = str(error)
         return {
             "workflow_status": "blocked",
@@ -1828,6 +1909,12 @@ def route_after_finalize_history(state: WorkflowState) -> str:
         return "blocked"
 
     return "workflow_complete"
+
+
+def route_after_workflow_complete(state: WorkflowState) -> str:
+    if state.get("no_change_outcome"):
+        return "cleanup"
+    return "prepare_push_branch"
 
 
 def workflow_complete_node(state: WorkflowState) -> dict:
@@ -2263,6 +2350,7 @@ def build_graph():
         "start_environment",
         start_environment_node,
     )
+    builder.add_node("resume_environment", resume_environment_node)
     builder.add_node(
         "prepare_current_step",
         prepare_current_step_node,
@@ -2541,7 +2629,22 @@ def build_graph():
     )
 
     builder.add_edge("environment_failure", "blocked")
-    builder.add_edge("workflow_complete", "prepare_push_branch")
+    builder.add_conditional_edges(
+        "workflow_complete",
+        route_after_workflow_complete,
+        {
+            "prepare_push_branch": "prepare_push_branch",
+            "cleanup": "cleanup",
+        },
+    )
+    builder.add_conditional_edges(
+        "resume_environment",
+        route_after_environment,
+        {
+            "prepare_current_step": "prepare_current_step",
+            "environment_failure": "environment_failure",
+        },
+    )
     builder.add_conditional_edges(
         "prepare_push_branch",
         route_after_prepare_push_branch,

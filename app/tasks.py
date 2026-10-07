@@ -32,10 +32,10 @@ class TaskStatus(StrEnum):
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.QUEUED: frozenset({TaskStatus.PLANNING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.PLANNING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.IMPLEMENTING: frozenset({TaskStatus.VALIDATING, TaskStatus.PUBLISHING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
+    TaskStatus.IMPLEMENTING: frozenset({TaskStatus.VALIDATING, TaskStatus.PUBLISHING, TaskStatus.COMPLETED, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.VALIDATING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.REVIEWING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.REVIEWING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.PUBLISHING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.PUBLISHING: frozenset({TaskStatus.WAITING_CI, TaskStatus.BLOCKED, TaskStatus.FAILED}),
+    TaskStatus.PUBLISHING: frozenset({TaskStatus.WAITING_CI, TaskStatus.COMPLETED, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.WAITING_CI: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.FINAL_REVIEW, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.FINAL_REVIEW: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.FAILED}),
     TaskStatus.READY: frozenset({TaskStatus.COMPLETED, TaskStatus.BLOCKED}),
@@ -706,9 +706,17 @@ class TaskStore:
                 completion = (
                     completion_value if isinstance(completion_value, dict) else {}
                 )
+                no_changes = completion.get("outcome") == "no_changes"
                 required = (
-                    "source", "merge_commit_sha", "merged_at", "merged_by",
-                    "base_branch", "post_merge_ci_status", "issue_closed",
+                    (
+                        "outcome", "summary", "issue_closed",
+                        "validation_status", "review_status",
+                    )
+                    if no_changes
+                    else (
+                        "source", "merge_commit_sha", "merged_at", "merged_by",
+                        "base_branch", "post_merge_ci_status", "issue_closed",
+                    )
                 )
                 missing = [
                     key for key in required
@@ -716,23 +724,31 @@ class TaskStore:
                     or completion[key] is None
                     or completion[key] == ""
                 ]
-                if completion.get("source") not in {"human_merge", "approved_review"}:
-                    missing.append("valid merge source")
-                if (
-                    not updates.get("pr_number", row["pr_number"])
-                    or not updates.get("pr_url", row["pr_url"])
-                ):
-                    missing.append("recorded pull request")
-                elif completion.get("pr_number") != updates.get("pr_number", row["pr_number"]):
-                    missing.append("matching pull request evidence")
-                if not re.fullmatch(r"[0-9a-f]{40}", str(completion.get("merge_commit_sha", ""))):
-                    missing.append("valid merge commit SHA")
-                if row["issue_number"] is not None and completion.get("issue_closed") is not True:
-                    missing.append("closed linked issue")
-                if updates.get("ci_status", row["ci_status"]) != "green":
-                    missing.append("green post-merge CI")
-                if completion.get("post_merge_ci_status") != "success":
-                    missing.append("successful post-merge CI evidence")
+                if no_changes:
+                    if completion.get("validation_status") != "validation_success":
+                        missing.append("successful final validation evidence")
+                    if completion.get("review_status") != "approved":
+                        missing.append("approved final review evidence")
+                    if completion.get("issue_closed") is not False:
+                        missing.append("open issue evidence for no-change outcome")
+                else:
+                    if completion.get("source") not in {"human_merge", "approved_review"}:
+                        missing.append("valid merge source")
+                    if (
+                        not updates.get("pr_number", row["pr_number"])
+                        or not updates.get("pr_url", row["pr_url"])
+                    ):
+                        missing.append("recorded pull request")
+                    elif completion.get("pr_number") != updates.get("pr_number", row["pr_number"]):
+                        missing.append("matching pull request evidence")
+                    if not re.fullmatch(r"[0-9a-f]{40}", str(completion.get("merge_commit_sha", ""))):
+                        missing.append("valid merge commit SHA")
+                    if row["issue_number"] is not None and completion.get("issue_closed") is not True:
+                        missing.append("closed linked issue")
+                    if updates.get("ci_status", row["ci_status"]) != "green":
+                        missing.append("green post-merge CI")
+                    if completion.get("post_merge_ci_status") != "success":
+                        missing.append("successful post-merge CI evidence")
                 if missing:
                     raise ValueError(
                         "Cannot mark task COMPLETED without " + ", ".join(missing)
@@ -767,11 +783,16 @@ class TaskStore:
                     current.value,
                     status.value,
                     (
-                        f"completed:{metadata['completion']['source']}:"
-                        f"pr#{metadata['completion']['pr_number']}:"
-                        f"{metadata['completion']['merge_commit_sha']}"
+                        "completed:no_changes"
                         if status == TaskStatus.COMPLETED
-                        else "transition"
+                        and metadata.get("completion", {}).get("outcome") == "no_changes"
+                        else (
+                            f"completed:{metadata['completion']['source']}:"
+                            f"pr#{metadata['completion']['pr_number']}:"
+                            f"{metadata['completion']['merge_commit_sha']}"
+                            if status == TaskStatus.COMPLETED
+                            else "transition"
+                        )
                     ),
                     now,
                 ),

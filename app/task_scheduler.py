@@ -83,6 +83,48 @@ def _sync_task_result(
     if task is None:
         return
     if workflow.get("workflow_status") == "completed":
+        if workflow.get("no_change_outcome"):
+            summary = str(
+                workflow.get("final_review", {}).get("summary")
+                or workflow.get("coder_summary")
+                or "The approved workflow found no safe implementation changes."
+            )
+            metadata = {
+                **task.metadata,
+                "issue_number": workflow.get("issue_number"),
+                "issue_title": workflow.get("issue_title", ""),
+                "issue_body": workflow.get("issue_body", ""),
+                "plan": workflow.get("plan", {}),
+                "workspace_audit": workflow.get("workspace_audit", {}),
+                "final_validation_status": workflow.get("final_validation_status", ""),
+                "final_review_status": workflow.get("final_review_status", ""),
+                "final_review": workflow.get("final_review", {}),
+                "completed_steps": workflow.get("completed_steps", []),
+                "attempt_artifacts": workflow.get("attempt_artifacts", []),
+                "coder_report": workflow.get("coder_report", {}),
+                "completion": {
+                    "outcome": "no_changes",
+                    "summary": summary,
+                    "validation_status": workflow.get("final_validation_status", ""),
+                    "review_status": workflow.get("final_review_status", ""),
+                    "issue_closed": False,
+                    "base_branch": task.metadata.get("base_branch", "develop"),
+                },
+                "release_promotion": {"status": "not_required"},
+            }
+            _track_task_state(
+                store,
+                task_id,
+                TaskStatus.COMPLETED,
+                pr_number=None,
+                pr_url="",
+                ci_status="not_required",
+                blocked_reason="",
+                workspace=workflow.get("workspace", ""),
+                branch=workflow.get("branch", ""),
+                metadata=metadata,
+            )
+            return
         metadata = {
             **task.metadata,
             "issue_number": workflow.get("issue_number"),
@@ -190,6 +232,12 @@ def _print_task(task: Any) -> None:
         print(f"Tests: {metadata.get('final_validation_status', 'unknown')}")
     if task.status == TaskStatus.COMPLETED:
         completion = task.metadata.get("completion", {})
+        if completion.get("outcome") == "no_changes":
+            print("Outcome: no safe code changes were identified")
+            print("PR: not created")
+            print("Issue closed: False")
+            print(f"Summary: {completion.get('summary', '')}")
+            return
         print(f"PR: {task.pr_url}")
         print(f"Merge commit: {completion.get('merge_commit_sha', 'unknown')}")
         print(f"Merged by: {completion.get('merged_by', 'unknown')}")
@@ -706,7 +754,11 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
             else ""
         )
         notification_status = (
-            f"{task.status.value}:{promotion_status}"
+            (
+                f"{task.status.value}:no_changes"
+                if task.metadata.get("completion", {}).get("outcome") == "no_changes"
+                else f"{task.status.value}:{promotion_status}"
+            )
             if task.status == TaskStatus.COMPLETED
             else task.status.value
         )
@@ -726,12 +778,20 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
             completion = task.metadata.get("completion", {})
             promotion = task.metadata.get("release_promotion", {})
             promotion_status = promotion.get("status", "not_required")
-            body = (
-                f"{mention}Task PR merged into `{completion.get('base_branch', 'develop')}` "
-                "and post-merge CI passed.\n\n"
-                f"Merged PR: {task.pr_url}\n"
-                f"Merge commit: `{completion.get('merge_commit_sha', 'unknown')}`"
-            )
+            if completion.get("outcome") == "no_changes":
+                body = (
+                    f"{mention}Task completed with no code changes.\n\n"
+                    f"{completion.get('summary', 'The approved workflow found no safe changes to make.')}\n\n"
+                    "Final validation passed and the independent review approved the result. "
+                    "No PR was created; the issue remains open for your review."
+                )
+            else:
+                body = (
+                    f"{mention}Task PR merged into `{completion.get('base_branch', 'develop')}` "
+                    "and post-merge CI passed.\n\n"
+                    f"Merged PR: {task.pr_url}\n"
+                    f"Merge commit: `{completion.get('merge_commit_sha', 'unknown')}`"
+                )
             if promotion_status == "awaiting_review":
                 body += (
                     f"\n\nRelease promotion PR: {promotion.get('pull_request_url')}\n"
@@ -768,6 +828,8 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
                     if task.metadata.get("release_promotion", {}).get("status") == "awaiting_review"
                     else "Preparing release promotion PR"
                     if task.metadata.get("release_promotion", {}).get("status") == "pending"
+                    else "Completed with no changes; issue remains open"
+                    if task.metadata.get("completion", {}).get("outcome") == "no_changes"
                     else f"Merged PR: {task.pr_url}"
                 )
             )

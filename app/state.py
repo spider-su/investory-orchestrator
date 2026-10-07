@@ -58,6 +58,7 @@ class WorkflowState(TypedDict):
     final_review: dict[str, Any]
     final_review_error: str
     final_commit_sha: Optional[str]
+    no_change_outcome: bool
 
     coder_summary: str
     coder_report: dict[str, Any]
