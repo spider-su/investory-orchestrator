@@ -9,6 +9,8 @@ import shutil
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -70,17 +72,119 @@ def _probe(task_id: str) -> int:
     return 1
 
 
+def _health_report(expected_sha: str) -> dict:
+    if expected_sha != "unknown" and not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        raise ValueError("invalid expected orchestrator revision")
+    root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    checks: dict[str, object] = {}
+    try:
+        _ensure_node_on_path(environment)
+        git = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        actual_sha = git.stdout.strip() if git.returncode == 0 else ""
+        checks["git"] = git.returncode == 0
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        checks["code_clean"] = bool(actual_sha) and status.returncode == 0 and status.stdout.strip() == ""
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        actual_sha = ""
+        checks["git"] = False
+        checks["code_clean"] = False
+    checks["revision_matches"] = expected_sha == "unknown" or actual_sha == expected_sha
+
+    versions: dict[str, str] = {}
+    for name, command in (
+        ("git", ["git", "--version"]),
+        ("gh", ["gh", "--version"]),
+        ("codex", ["codex", "--version"]),
+    ):
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=10,
+                check=False, env=environment,
+            )
+            checks[f"{name}_installed"] = result.returncode == 0
+            if result.returncode == 0 and result.stdout.strip():
+                versions[name] = result.stdout.splitlines()[0][:120]
+        except (OSError, subprocess.TimeoutExpired):
+            checks[f"{name}_installed"] = False
+
+    for name, command in (
+        ("gh_authenticated", ["gh", "auth", "status", "--hostname", "github.com"]),
+        ("codex_authenticated", ["codex", "login", "status"]),
+    ):
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=10,
+                check=False, env=environment,
+            )
+            checks[name] = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            checks[name] = False
+
+    workspaces = Path(
+        os.getenv("MAC_WORKSPACES_DIR", "~/.investory-orchestrator/task-workspaces")
+    ).expanduser()
+    try:
+        workspaces.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=workspaces, prefix="health-", delete=True):
+            pass
+        checks["workspace_writable"] = True
+    except OSError:
+        checks["workspace_writable"] = False
+
+    ready = all(checks.values())
+    failed = [name for name, passed in checks.items() if not passed]
+    detail = (
+        f"Mac runner ready at {actual_sha[:12]} ({versions.get('codex', 'Codex version unavailable')})."
+        if ready
+        else "Mac runner unavailable; failed checks: " + ", ".join(failed)
+    )
+    return {
+        "status": "ready" if ready else "unavailable",
+        "detail": detail,
+        "checks": checks,
+        "versions": versions,
+        "actual_sha": actual_sha,
+        "expected_sha": expected_sha,
+    }
+
+
+def _health(expected_sha: str) -> int:
+    try:
+        report = _health_report(expected_sha)
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+        report = {
+            "status": "unavailable",
+            "detail": f"Mac runner health probe failed: {type(error).__name__}.",
+            "checks": {"health_probe": False},
+            "versions": {},
+            "expected_sha": expected_sha,
+        }
+    print(json.dumps(report, separators=(",", ":")))
+    return 0 if report["status"] == "ready" else 1
+
+
 def _run(arguments: list[str]) -> int:
-    if len(arguments) != 6:
-        raise ValueError("run expects task id, issue, branch, resume, and ci-repair")
+    if len(arguments) != 7:
+        raise ValueError("run expects task id, issue, branch, resume, ci-repair, and expected revision")
     task_id = _task_id(arguments[1])
-    issue_argument, base_branch, resume, ci_repair = arguments[2:]
+    issue_argument, base_branch, resume, ci_repair, expected_sha = arguments[2:]
     if issue_argument != "-" and not re.fullmatch(r"-?[0-9]+", issue_argument):
         raise ValueError("invalid issue number")
     if base_branch != "-" and not BRANCH_PATTERN.fullmatch(base_branch):
         raise ValueError("invalid base branch")
     if resume not in {"0", "1"} or ci_repair not in {"0", "1"}:
         raise ValueError("invalid worker flags")
+    health = _health_report(expected_sha)
+    if health["status"] != "ready":
+        print(json.dumps({"task_id": task_id, "runner": health}, separators=(",", ":")))
+        return 78
 
     lock_path = _lock_path(task_id)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +219,21 @@ def _run(arguments: list[str]) -> int:
             )
         ).expanduser()
         environment["RUNS_DIR"] = str(runs_dir)
-        return subprocess.call(command, cwd=Path(__file__).resolve().parents[1], env=environment)
+        started_at = time.time()
+        print(json.dumps({
+            "timestamp": started_at, "task_id": task_id,
+            "node": "mac_runner", "event": "worker_started",
+            "expected_sha": expected_sha,
+        }, separators=(",", ":")), flush=True)
+        exit_code = subprocess.call(
+            command, cwd=Path(__file__).resolve().parents[1], env=environment
+        )
+        print(json.dumps({
+            "timestamp": time.time(), "task_id": task_id,
+            "node": "mac_runner", "event": "worker_finished",
+            "exit_code": exit_code, "duration_seconds": round(time.time() - started_at, 3),
+        }, separators=(",", ":")), flush=True)
+        return exit_code
 
 
 def _review(arguments: list[str]) -> int:
@@ -210,11 +328,13 @@ def main() -> int:
         arguments = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
         if len(arguments) == 2 and arguments[0] == "probe":
             return _probe(arguments[1])
+        if len(arguments) == 2 and arguments[0] == "health":
+            return _health(arguments[1])
         if arguments and arguments[0] == "run":
             return _run(arguments)
         if arguments and arguments[0] == "review":
             return _review(arguments)
-        raise ValueError("only run, review, and probe requests are accepted")
+        raise ValueError("only health, run, review, and probe requests are accepted")
     except (OSError, RuntimeError, ValueError) as error:
         print(f"Rejected Mac runner request: {error}", file=sys.stderr)
         return 64

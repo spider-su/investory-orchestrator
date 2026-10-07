@@ -32,8 +32,9 @@ class MacSshEntrypointTests(unittest.TestCase):
                     clear=False,
                 ),
                 patch("scripts.mac_ssh_entrypoint.subprocess.call", return_value=0) as call,
+                patch("scripts.mac_ssh_entrypoint._health_report", return_value={"status": "ready"}),
             ):
-                result = _run(["run", "spider-su/investory#20", "20", "develop", "1", "0"])
+                result = _run(["run", "spider-su/investory#20", "20", "develop", "1", "0", "unknown"])
         self.assertEqual(result, 0)
         self.assertEqual(
             call.call_args.args[0],
@@ -63,10 +64,11 @@ class MacSshEntrypointTests(unittest.TestCase):
                 ),
                 patch.dict(os.environ, {"MAC_WORKSPACES_DIR": ""}, clear=False),
                 patch("scripts.mac_ssh_entrypoint.subprocess.call", return_value=0) as call,
+                patch("scripts.mac_ssh_entrypoint._health_report", return_value={"status": "ready"}),
             ):
                 os.environ.pop("MAC_WORKSPACES_DIR", None)
                 self.assertEqual(
-                    _run(["run", "abcdef123456", "20", "develop", "0", "0"]),
+                    _run(["run", "abcdef123456", "20", "develop", "0", "0", "unknown"]),
                     0,
                 )
 

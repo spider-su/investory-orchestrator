@@ -282,6 +282,23 @@ class TaskStore:
                     updated_at REAL NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS service_status (
+                    name TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    updated_at DOUBLE PRECISION NOT NULL
+                )"""
+                if self.is_postgres
+                else """CREATE TABLE IF NOT EXISTS service_status (
+                    name TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    updated_at REAL NOT NULL
+                )"""
+            )
             if not repository_config_table_exists:
                 self._execute(
                     connection,
@@ -440,6 +457,29 @@ class TaskStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def heartbeat_worker(self, task_id: str, owner: str, pid: int) -> None:
+        now = time.time()
+        values = {"lease_owner": owner, "worker_heartbeat_at": now, "worker_pid": pid}
+        metadata_value: Any = json.dumps(values)
+        if self.is_postgres:
+            from psycopg.types.json import Jsonb
+
+            metadata_value = Jsonb(values)
+        with self._connection() as connection:
+            if self.is_postgres:
+                self._execute(
+                    connection,
+                    "UPDATE tasks SET metadata=metadata || ?, updated_at=? WHERE task_id=?",
+                    (metadata_value, now, task_id),
+                )
+            else:
+                self._execute(
+                    connection,
+                    "UPDATE tasks SET metadata=json_patch(metadata, ?), updated_at=? "
+                    "WHERE task_id=?",
+                    (metadata_value, now, task_id),
+                )
+
     def list_repositories(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = self._execute(
@@ -447,6 +487,71 @@ class TaskStore:
                 "SELECT * FROM repository_configs ORDER BY repository",
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def set_service_status(
+        self,
+        name: str,
+        status: str,
+        detail: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = time.time()
+        status_metadata: Any = json.dumps(metadata or {})
+        if self.is_postgres:
+            from psycopg.types.json import Jsonb
+
+            status_metadata = Jsonb(metadata or {})
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """INSERT INTO service_status (name, status, detail, metadata, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET status=excluded.status,
+                detail=excluded.detail, metadata=excluded.metadata,
+                updated_at=excluded.updated_at""",
+                (name, status, detail, status_metadata, now),
+            )
+        return {
+            "name": name,
+            "status": status,
+            "detail": detail,
+            "metadata": metadata or {},
+            "updated_at": now,
+        }
+
+    def get_service_status(self, name: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = self._execute(
+                connection,
+                "SELECT * FROM service_status WHERE name=?",
+                (name,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        if isinstance(value.get("metadata"), str):
+            try:
+                value["metadata"] = json.loads(value["metadata"])
+            except json.JSONDecodeError:
+                value["metadata"] = {}
+        return value
+
+    def list_service_status(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                "SELECT * FROM service_status ORDER BY name",
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            if isinstance(value.get("metadata"), str):
+                try:
+                    value["metadata"] = json.loads(value["metadata"])
+                except json.JSONDecodeError:
+                    value["metadata"] = {}
+            result.append(value)
+        return result
 
     def get_repository(self, repository: str) -> dict[str, Any] | None:
         with self._connection() as connection:

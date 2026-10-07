@@ -19,6 +19,8 @@ RUN python -m pip install --no-cache-dir --upgrade 'pip' \
 
 # This target is used by both k3s Deployments. Codex and build tools stay on devMac.
 FROM python-deps AS k3s
+ARG ORCHESTRATOR_BUILD_SHA=unknown
+ENV ORCHESTRATOR_BUILD_SHA=${ORCHESTRATOR_BUILD_SHA}
 COPY . .
 ENTRYPOINT ["python"]
 CMD ["-m", "app", "--help"]
@@ -40,6 +42,8 @@ RUN go mod edit -replace=github.com/moby/go-archive=github.com/moby/go-archive@v
 
 # Keep the default target as the full local/worker image used by docker compose.
 FROM python-deps AS full
+ARG ORCHESTRATOR_BUILD_SHA=unknown
+ENV ORCHESTRATOR_BUILD_SHA=${ORCHESTRATOR_BUILD_SHA}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
