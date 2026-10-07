@@ -94,7 +94,7 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "QUEUED -> READY"):
             self.store.transition(task.task_id, TaskStatus.READY)
 
-    def test_completed_requires_human_merge_and_successful_post_merge_ci(self) -> None:
+    def test_merged_completion_requires_post_merge_ci(self) -> None:
         task = self.store.create(title="Run task")
         task = self.store.transition(task.task_id, TaskStatus.PLANNING)
         task = self.store.transition(task.task_id, TaskStatus.BLOCKED)
@@ -136,6 +136,35 @@ class TaskStoreTests(unittest.TestCase):
                 ci_status="pending",
                 metadata={"completion": {"source": "automation"}},
             )
+
+    def test_completed_accepts_reviewed_and_validated_no_change_outcome(self) -> None:
+        task = self.store.create(
+            title="No safe change", issue_number=43, source="github_issue"
+        )
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.IMPLEMENTING)
+        task = self.store.transition(task.task_id, TaskStatus.PUBLISHING)
+
+        completed = self.store.transition(
+            task.task_id,
+            TaskStatus.COMPLETED,
+            pr_number=None,
+            pr_url="",
+            ci_status="not_required",
+            metadata={
+                "completion": {
+                    "outcome": "no_changes",
+                    "summary": "No candidate was proven safe to remove.",
+                    "validation_status": "validation_success",
+                    "review_status": "approved",
+                    "issue_closed": False,
+                }
+            },
+        )
+
+        self.assertEqual(completed.status, TaskStatus.COMPLETED)
+        self.assertIsNone(completed.pr_number)
+        self.assertEqual(completed.metadata["completion"]["outcome"], "no_changes")
 
     def test_service_status_persists_and_worker_heartbeat_merges_metadata(self) -> None:
         task = self.store.create(title="heartbeat", metadata={"preserved": True})

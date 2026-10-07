@@ -12,8 +12,10 @@ from app.graph import (
     cleanup_node,
     complete_step_node,
     create_draft_pr_node,
+    finalize_history_node,
     push_branch_node,
     resolve_resume_from,
+    resume_environment_node,
     route_after_validation,
     start_environment_node,
     run_validation_node,
@@ -21,6 +23,7 @@ from app.graph import (
 from app.agents.coder import CoderError
 from app.side_effects import (
     prepare_draft_pr_intent,
+    prepare_finalization_intent,
     prepare_push_intent,
 )
 
@@ -107,6 +110,36 @@ class FakeGitHubClient:
 
 
 class GraphCompletionTests(unittest.TestCase):
+    def test_finalization_accepts_reviewed_no_change_outcome(self) -> None:
+        state = build_state()
+        state.update(
+            {
+                "issue_baseline_sha": "a" * 40,
+                "final_baseline_sha": "a" * 40,
+                "final_validation_status": "validation_success",
+                "final_review_status": "approved",
+                "side_effect_intent": prepare_finalization_intent(
+                    issue_number=42,
+                    baseline_sha="a" * 40,
+                    checkpoint_sha="a" * 40,
+                ),
+            }
+        )
+        with patch(
+            "app.graph.finalize_checkpoint_history",
+            side_effect=RuntimeError(
+                "No implementation changes remain for final commit."
+            ),
+        ), patch("app.graph.workspace_has_changes", return_value=False):
+            result = finalize_history_node(state)
+
+        self.assertEqual(result["workflow_status"], "completed")
+        self.assertTrue(result["no_change_outcome"])
+        self.assertEqual(result["side_effect_intent"], {})
+        self.assertEqual(
+            result["side_effect_history"][-1]["outcome"], "no_changes"
+        )
+
     def test_documentation_only_task_skips_container_start(self) -> None:
         state = {
             "issue_body": (
@@ -122,6 +155,34 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertFalse(result["environment_started"])
         self.assertIn("application tests are prohibited", result["environment_output"])
         start_mock.assert_not_called()
+
+    def test_coder_resume_starts_environment_again(self) -> None:
+        state = {"workspace": "/tmp/issue-42", "issue_number": 42}
+        with patch(
+            "app.graph.start_environment",
+            return_value={"success": True, "output": "started"},
+        ) as start_mock:
+            result = resume_environment_node(state)
+
+        start_mock.assert_called_once()
+        self.assertTrue(result["environment_ready"])
+        self.assertTrue(result["environment_started"])
+        self.assertEqual(result["environment_output"], "started")
+
+    def test_documentation_only_coder_resume_keeps_container_skipped(self) -> None:
+        state = {
+            "workspace": "/tmp/issue-42",
+            "issue_number": 42,
+            "issue_body": (
+                "Documentation-only. Do not run application tests."
+            ),
+        }
+        with patch("app.graph.start_environment") as start_mock:
+            result = resume_environment_node(state)
+
+        start_mock.assert_not_called()
+        self.assertTrue(result["environment_ready"])
+        self.assertFalse(result["environment_started"])
 
     def test_cleanup_does_not_stop_container_that_was_not_started(self) -> None:
         state = {
@@ -180,7 +241,7 @@ class GraphCompletionTests(unittest.TestCase):
                     "attempt": result["attempt"],
                 }
             ),
-            "prepare_current_step",
+            "resume_environment",
         )
 
     def test_coder_infrastructure_failure_does_not_consume_attempt(self) -> None:

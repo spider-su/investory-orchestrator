@@ -388,6 +388,67 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual(saved.pr_number, 18)
         self.assertEqual(saved.ci_status, "queued")
 
+    def test_no_change_workflow_completes_without_pr_or_issue_close(self) -> None:
+        task = self.store.create(
+            title="No safe change", issue_number=45, source="github_issue"
+        )
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.IMPLEMENTING)
+
+        _sync_task_result(
+            self.store,
+            task.task_id,
+            {
+                "workflow_status": "completed",
+                "no_change_outcome": True,
+                "issue_number": 45,
+                "issue_title": "No safe change",
+                "branch": "agent/issue-45",
+                "final_validation_status": "validation_success",
+                "final_review_status": "approved",
+                "final_review": {"summary": "No candidate was proven safe."},
+            },
+        )
+
+        saved = self.store.get(task.task_id)
+        self.assertEqual(saved.status, TaskStatus.COMPLETED)
+        self.assertIsNone(saved.pr_number)
+        self.assertEqual(saved.ci_status, "not_required")
+        self.assertFalse(saved.metadata["completion"]["issue_closed"])
+
+    def test_no_change_completion_notification_explains_no_pr(self) -> None:
+        task = self.store.create(
+            title="No safe change", issue_number=46, source="github_issue"
+        )
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.IMPLEMENTING)
+        task = self.store.transition(task.task_id, TaskStatus.PUBLISHING)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.COMPLETED,
+            pr_number=None,
+            pr_url="",
+            ci_status="not_required",
+            metadata={
+                "completion": {
+                    "outcome": "no_changes",
+                    "summary": "No candidate was proven safe to remove.",
+                    "validation_status": "validation_success",
+                    "review_status": "approved",
+                    "issue_closed": False,
+                },
+                "release_promotion": {"status": "not_required"},
+            },
+        )
+        with patch("app.github_client.GitHubAppClient") as client_type:
+            _notify_terminal_tasks(self.store)
+        posted = [
+            call.args[1]
+            for call in client_type.return_value.upsert_issue_comment.call_args_list
+        ]
+        self.assertTrue(any("completed with no code changes" in body for body in posted))
+        self.assertTrue(any("No PR was created" in body for body in posted))
+
     def test_failed_ci_consumes_attempt_and_blocks_for_repair(self) -> None:
         task = self.store.create(title="ci")
         for status in (

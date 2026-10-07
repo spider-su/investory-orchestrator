@@ -85,6 +85,7 @@ def build_initial_state(
         "final_review": {},
         "final_review_error": "",
         "final_commit_sha": None,
+        "no_change_outcome": False,
         "environment_output": "",
         "environment_ready": False,
         "environment_started": False,
