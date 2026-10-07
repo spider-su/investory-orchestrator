@@ -716,7 +716,7 @@ class TaskStore:
                     or completion[key] is None
                     or completion[key] == ""
                 ]
-                if completion.get("source") != "human_merge":
+                if completion.get("source") not in {"human_merge", "approved_review"}:
                     missing.append("valid merge source")
                 if (
                     not updates.get("pr_number", row["pr_number"])

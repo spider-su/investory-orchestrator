@@ -267,6 +267,8 @@ class GitHubAppClient:
     def find_open_pr_by_branch(
         self,
         branch: str,
+        *,
+        base: str | None = None,
     ) -> PullRequest | None:
         repository = self.get_repository()
         owner = repository.owner.login
@@ -277,7 +279,11 @@ class GitHubAppClient:
                 head=f"{owner}:{branch}",
             )
 
-            matches = list(pull_requests)
+            matches = [
+                pull_request
+                for pull_request in pull_requests
+                if base is None or pull_request.base.ref == base
+            ]
 
             if len(matches) > 1:
                 raise RuntimeError(
@@ -295,6 +301,114 @@ class GitHubAppClient:
             ) from error
 
         return None
+
+    def get_latest_review_approval(
+        self,
+        pull_request_number: int,
+        reviewer_login: str,
+    ) -> dict[str, str] | None:
+        """Return that reviewer's latest submitted review for the current PR head."""
+        try:
+            pull_request = self.get_pull_request(pull_request_number)
+            current_head = pull_request.head.sha
+            reviews = [
+                review
+                for review in pull_request.get_reviews()
+                if (getattr(getattr(review, "user", None), "login", "") or "").casefold()
+                == reviewer_login.casefold()
+                and getattr(review, "submitted_at", None) is not None
+            ]
+            if not reviews:
+                return None
+            latest = max(reviews, key=lambda review: (review.submitted_at, review.id))
+            return {
+                "reviewer": reviewer_login,
+                "state": (latest.state or "").upper(),
+                "commit_sha": latest.commit_id or "",
+                "current_head_sha": current_head,
+                "review_id": str(latest.id),
+                "submitted_at": latest.submitted_at.isoformat(),
+            }
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to inspect reviews for pull request "
+                f"#{pull_request_number}: {error.status} {error.data}"
+            ) from error
+
+    def merge_approved_pull_request(
+        self,
+        pull_request_number: int,
+        *,
+        reviewer_login: str,
+        expected_head_sha: str,
+        merge_method: str = "squash",
+    ) -> dict[str, str]:
+        """Merge only the reviewed head, rechecking approval immediately before merge."""
+        if merge_method not in {"merge", "squash", "rebase"}:
+            raise ValueError("merge_method must be merge, squash, or rebase")
+        pull_request = self.get_pull_request(pull_request_number)
+        if pull_request.state != "open" or pull_request.merged:
+            raise RuntimeError(f"Pull request #{pull_request_number} is not open")
+        if pull_request.draft:
+            raise RuntimeError(f"Pull request #{pull_request_number} is still a draft")
+        if pull_request.head.sha != expected_head_sha:
+            raise RuntimeError("Pull request head changed after final review")
+        approval = self.get_latest_review_approval(
+            pull_request_number, reviewer_login
+        )
+        if (
+            approval is None
+            or approval["state"] != "APPROVED"
+            or approval["commit_sha"] != expected_head_sha
+            or approval["current_head_sha"] != expected_head_sha
+        ):
+            raise RuntimeError(
+                f"Pull request #{pull_request_number} lacks a current approval "
+                f"from @{reviewer_login}"
+            )
+        try:
+            result = pull_request.merge(
+                merge_method=merge_method,
+                sha=expected_head_sha,
+            )
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to merge pull request #{pull_request_number}: "
+                f"{error.status} {error.data}"
+            ) from error
+        if not result.merged:
+            raise RuntimeError(
+                f"GitHub did not merge pull request #{pull_request_number}: "
+                f"{result.message}"
+            )
+        return {**approval, "merge_commit_sha": result.sha or ""}
+
+    def create_release_promotion_pr(
+        self,
+        *,
+        head: str,
+        base: str,
+    ) -> PullRequest:
+        """Open a ready-for-review PR to promote accumulated branch changes."""
+        try:
+            return self.get_repository().create_pull(
+                title=f"Promote {head} to {base}",
+                body=(
+                    f"Promote all changes currently on `{head}` to `{base}`.\n\n"
+                    "This release PR is opened after an orchestrated task has "
+                    "merged into the development branch and passed post-merge CI. "
+                    "Review the accumulated diff and merge manually when the "
+                    "release is ready."
+                ),
+                head=head,
+                base=base,
+                draft=False,
+            )
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to create release promotion PR from '{head}' to '{base}': "
+                f"{error.status} {error.data}"
+            ) from error
 
     def get_pull_request(
         self,

@@ -96,7 +96,24 @@ const apiPrefix=location.pathname.replace(/\\/+$/,'');
 async function api(path,options={}){const response=await fetch(apiPrefix+path,{...options,headers:{'Content-Type':'application/json','Authorization':'Bearer '+tokenInput.value,...options.headers}});if(!response.ok)throw Error((await response.text())||response.statusText);return response.json()}
 function date(value){return new Date(value*1000).toLocaleString()}
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function refresh(){try{document.querySelector('#error').textContent='';const [stats,tasks,repos,system]=await Promise.all([api('/api/stats'),api('/api/tasks'),api('/api/repositories'),api('/api/system')]);document.querySelector('#system').innerHTML=system.map(s=>`<p><b>${esc(s.name)}: ${esc(s.status)}</b> — ${esc(s.detail)}<br><small>Updated ${esc(date(s.updated_at))}</small></p>`).join('')||'No runner status has been recorded yet.';document.querySelector('#stats').innerHTML=Object.entries({'Total':stats.total,'Last 7 days':stats.last_7_days,...stats.by_status}).map(([k,v])=>`<div class="stat"><b>${esc(v)}</b><div class="muted">${esc(k)}</div></div>`).join('');document.querySelector('#tasks').innerHTML=tasks.map(t=>`<tr><td>${esc(t.title)}<br><small class="muted">${esc(t.task_id)}</small></td><td>${esc(t.repository)}</td><td>${esc(t.status)}</td><td>${t.priority}</td><td>${String(t.pr_url||'').startsWith('https://github.com/')?`<a href="${esc(t.pr_url)}" rel="noopener">#${t.pr_number}</a>`:'—'}</td><td>${esc(date(t.updated_at))}</td></tr>`).join('');document.querySelector('#repositories').innerHTML=repos.map(r=>`<li>${r.enabled?'●':'○'} <b>${esc(r.repository)}</b> → ${esc(r.base_branch)} · notify @${esc(r.notification_login||'not set')} <button data-delete="${esc(r.repository)}">Delete</button></li>`).join('');document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{await api('/api/repositories/'+encodeURIComponent(b.dataset.delete),{method:'DELETE'});refresh()})}catch(e){document.querySelector('#error').textContent=e.message}}
+async function refresh(){
+  try{
+    document.querySelector('#error').textContent='';
+    const [stats,tasks,repos,system]=await Promise.all([
+      api('/api/stats'),api('/api/tasks'),api('/api/repositories'),api('/api/system')
+    ]);
+    document.querySelector('#system').innerHTML=system.map(s=>`<p><b>${esc(s.name)}: ${esc(s.status)}</b> — ${esc(s.detail)}<br><small>Updated ${esc(date(s.updated_at))}</small></p>`).join('')||'No runner status has been recorded yet.';
+    document.querySelector('#stats').innerHTML=Object.entries({'Total':stats.total,'Last 7 days':stats.last_7_days,...stats.by_status}).map(([k,v])=>`<div class="stat"><b>${esc(v)}</b><div class="muted">${esc(k)}</div></div>`).join('');
+    document.querySelector('#tasks').innerHTML=tasks.map(t=>{
+      const release=t.metadata?.release_promotion;
+      const taskPr=String(t.pr_url||'').startsWith('https://github.com/')?`<a href="${esc(t.pr_url)}" rel="noopener">Task #${t.pr_number}</a>`:'—';
+      const releasePr=String(release?.pull_request_url||'').startsWith('https://github.com/')?`<br><a href="${esc(release.pull_request_url)}" rel="noopener">Release #${esc(release.pull_request_number)} (${esc(release.status)})</a>`:'';
+      return `<tr><td>${esc(t.title)}<br><small class="muted">${esc(t.task_id)}</small></td><td>${esc(t.repository)}</td><td>${esc(t.status)}</td><td>${t.priority}</td><td>${taskPr}${releasePr}</td><td>${esc(date(t.updated_at))}</td></tr>`
+    }).join('');
+    document.querySelector('#repositories').innerHTML=repos.map(r=>`<li>${r.enabled?'●':'○'} <b>${esc(r.repository)}</b> → ${esc(r.base_branch)} · notify @${esc(r.notification_login||'not set')} <button data-delete="${esc(r.repository)}">Delete</button></li>`).join('');
+    document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{await api('/api/repositories/'+encodeURIComponent(b.dataset.delete),{method:'DELETE'});refresh()})
+  }catch(e){document.querySelector('#error').textContent=e.message}
+}
 document.querySelector('#repo').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const project=f.get('github_project_number');try{await api('/api/repositories',{method:'PUT',body:JSON.stringify({repository:f.get('repository'),base_branch:f.get('base_branch'),notification_login:f.get('notification_login'),github_project_number:project?Number(project):null,priority_field_name:f.get('priority_field_name'),poll_interval_seconds:Number(f.get('poll_interval_seconds')),enabled:f.has('enabled')})});refresh()}catch(err){document.querySelector('#error').textContent=err.message}};
 refresh();setInterval(refresh,15000);
 </script></body></html>"""

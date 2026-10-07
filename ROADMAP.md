@@ -113,7 +113,8 @@ state for safe resume.
 - Verify whole-plan repair and final history rewriting.
 - Run repeated live verification for GitHub Actions polling, repair, and
   final-review gating.
-- Keep PRs draft and retain human merge approval.
+- Keep task PRs draft until automated gates pass; merge only after configured
+  human approval, then retain a separate manual release-promotion PR.
 
 ## Priority 3 — Improve diagnostics and recovery
 

@@ -7,15 +7,16 @@ deterministic validation, isolated Git checkouts, GitHub Actions, repair loops,
 and a durable task queue backed by SQLite for local use or PostgreSQL for
 deployment.
 
-It does not merge pull requests automatically. Human review remains the final
-approval step.
+An authorized human review remains the merge authorization. After that approval,
+the scheduler merges the reviewed task PR into the configured development branch
+and opens a separate development-to-release PR for manual release review.
 
 ## Current status
 
-The k3s/devMac flow has been exercised on Issue #20 through repository
-validation and final independent review. That run stopped before PR publication
-because the existing branch had no new changes to commit. A complete PR
-lifecycle and unattended production use remain unverified.
+The `ready_to_develop` intake, k3s scheduler, dashboard, and Mac SSH worker are
+deployed. Issue #104 reached COMPLETED with PR #105 and green post-merge CI
+before approval-triggered merging was added. The new approved-merge and
+development-to-release promotion path still needs its first live run.
 
 [`ROADMAP.md`](ROADMAP.md) is the authoritative source for implementation,
 verification, and production-readiness status.
@@ -86,11 +87,14 @@ attempts and timeout use `MAX_FINAL_REVIEW_ATTEMPTS` and
 `MAC_REVIEW_TIMEOUT_SECONDS`.
 
 With `MAC_SSH_TARGET` configured, whole-plan final review runs on the Mac
-runner against the exact open PR head. The scheduler polls READY tasks after
-human merge and records completion only after CI on the merge commit succeeds;
-it then closes the issue linked by the PR. For a merge made before scheduler
-tracking, `--reconcile-merged-pr '<task-id>'` verifies the merge, target branch,
-linked issue, and post-merge CI before recording the human merge.
+runner against the exact open PR head. The scheduler polls READY tasks for an
+approval from the configured repository login on the exact reviewed head. With
+green CI it merges the task PR into the configured development branch, then
+records completion only after CI on the merge commit succeeds and closes the
+linked issue. It opens or reuses a separate development-to-release PR for manual
+review. For a manual merge made before scheduler tracking,
+`--reconcile-merged-pr '<task-id>'` verifies the merge, target branch, linked
+issue, and post-merge CI before recording it.
 
 The planner, coder, and reviewer use the authenticated Codex CLI, not the
 OpenAI API. Set `HOST_CODEX_DIR` to the host's authenticated Codex directory.
@@ -112,8 +116,8 @@ READY when those identities match or are missing.
   inspection instead of being reset automatically.
 - Existing graph recovery still needs broader crash-boundary testing around
   local commits and final history rewriting.
-- Human approval and merge remain outside the orchestrator; merged PRs are
-  tracked afterward and successful tasks move to `COMPLETED`.
+- Human approval remains required. Only the configured reviewer can authorize
+  the task PR merge; release-promotion PRs are never merged automatically.
 - Codex execution depends on available authentication and usage quota.
 
 ## Documentation

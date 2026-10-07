@@ -31,6 +31,8 @@ GITHUB_REPOSITORY=spider-su/investory
 WORKSPACES_DIR=/app/workspaces
 TASK_DB=/app/data/tasks.db
 BASE_BRANCH=main
+RELEASE_BRANCH=main
+APPROVED_PR_MERGE_METHOD=squash
 MAX_ATTEMPTS=3
 MAX_FINAL_ATTEMPTS=3
 CI_RETRY_ATTEMPTS=3
@@ -56,8 +58,11 @@ workspace, or Codex invocation is created. A valid issue is persisted, then
 receives a stable status comment and has its label removed. The dashboard shows
 task progress and Mac runner/queue health. Once CI and independent final review
 pass, the draft PR is marked ready for review and the configured GitHub login
-is mentioned. A human reviews and merges it; the scheduler then records
-post-merge CI and completion.
+is mentioned. When configured, an approving review from that login authorizes
+the scheduler to merge the exact reviewed head into the configured development
+branch, provided head CI remains green. After successful post-merge CI, the
+scheduler records completion and opens or reuses a development-to-release PR.
+That release PR is reviewed and merged manually.
 
 Planner, coder, and reviewer all run as separate local Codex CLI invocations.
 They authenticate through the mounted Codex home directory; they do not use
@@ -378,7 +383,9 @@ The orchestrator pushes `agent/issue-<number>`, reuses an existing open PR for
 that branch when present, and otherwise creates a draft PR. Completion is
 recorded only after the PR operation succeeds.
 
-The orchestrator does not merge automatically. Human review is always required.
+Task PR merges are automated only after explicit approval from the configured
+GitHub login, with current-head, CI, and independent-review checks. Release PRs
+remain manual and target the configured release branch (default `main`).
 
 ## Retention and cleanup
 

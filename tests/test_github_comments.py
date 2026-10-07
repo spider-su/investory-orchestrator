@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -111,6 +112,113 @@ class GitHubCommentTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Multiple open"):
             self.client.find_open_pr_by_branch("agent/issue-42")
+
+    def test_latest_approval_requires_configured_reviewer_and_current_head(self) -> None:
+        submitted = datetime(2026, 10, 7, tzinfo=timezone.utc)
+        current = SimpleNamespace(
+            id=2,
+            user=SimpleNamespace(login="spider-su"),
+            state="APPROVED",
+            commit_id="head-sha",
+            submitted_at=submitted,
+        )
+        stale = SimpleNamespace(
+            id=1,
+            user=SimpleNamespace(login="spider-su"),
+            state="APPROVED",
+            commit_id="old-sha",
+            submitted_at=datetime(2026, 10, 6, tzinfo=timezone.utc),
+        )
+        other_reviewer = SimpleNamespace(
+            id=3,
+            user=SimpleNamespace(login="other"),
+            state="CHANGES_REQUESTED",
+            commit_id="head-sha",
+            submitted_at=datetime(2026, 10, 8, tzinfo=timezone.utc),
+        )
+        pull = SimpleNamespace(
+            head=SimpleNamespace(sha="head-sha"),
+            get_reviews=Mock(return_value=[stale, current, other_reviewer]),
+        )
+        self.client.get_pull_request = Mock(return_value=pull)
+
+        approval = self.client.get_latest_review_approval(13, "SPIDER-SU")
+
+        self.assertEqual(approval["reviewer"], "SPIDER-SU")
+        self.assertEqual(approval["state"], "APPROVED")
+        self.assertEqual(approval["commit_sha"], "head-sha")
+        self.assertEqual(approval["review_id"], "2")
+
+    def test_merge_rechecks_approval_and_pins_head_sha(self) -> None:
+        result = SimpleNamespace(merged=True, sha="merge-sha", message="Merged")
+        pull = SimpleNamespace(
+            state="open",
+            merged=False,
+            draft=False,
+            head=SimpleNamespace(sha="head-sha"),
+            merge=Mock(return_value=result),
+        )
+        self.client.get_pull_request = Mock(return_value=pull)
+        self.client.get_latest_review_approval = Mock(return_value={
+            "reviewer": "spider-su",
+            "state": "APPROVED",
+            "commit_sha": "head-sha",
+            "current_head_sha": "head-sha",
+            "review_id": "77",
+            "submitted_at": "2026-10-07T12:00:00+00:00",
+        })
+
+        merged = self.client.merge_approved_pull_request(
+            13,
+            reviewer_login="spider-su",
+            expected_head_sha="head-sha",
+        )
+
+        pull.merge.assert_called_once_with(merge_method="squash", sha="head-sha")
+        self.assertEqual(merged["merge_commit_sha"], "merge-sha")
+
+    def test_merge_rejects_stale_approval_without_calling_github_merge(self) -> None:
+        pull = SimpleNamespace(
+            state="open",
+            merged=False,
+            draft=False,
+            head=SimpleNamespace(sha="head-sha"),
+            merge=Mock(),
+        )
+        self.client.get_pull_request = Mock(return_value=pull)
+        self.client.get_latest_review_approval = Mock(return_value={
+            "reviewer": "spider-su",
+            "state": "APPROVED",
+            "commit_sha": "old-sha",
+            "current_head_sha": "head-sha",
+        })
+
+        with self.assertRaisesRegex(RuntimeError, "lacks a current approval"):
+            self.client.merge_approved_pull_request(
+                13,
+                reviewer_login="spider-su",
+                expected_head_sha="head-sha",
+            )
+
+        pull.merge.assert_not_called()
+
+    def test_open_promotion_pr_filters_existing_prs_by_base(self) -> None:
+        development_pr = SimpleNamespace(
+            number=11, base=SimpleNamespace(ref="main")
+        )
+        other_pr = SimpleNamespace(
+            number=12, base=SimpleNamespace(ref="develop")
+        )
+        repository = SimpleNamespace(
+            owner=SimpleNamespace(login="spider-su"),
+            get_pulls=Mock(return_value=[other_pr, development_pr]),
+        )
+        self.client.get_repository = Mock(return_value=repository)
+
+        self.assertEqual(
+            self.client.find_open_pr_by_branch("develop", base="main"),
+            development_pr,
+        )
 
 
 if __name__ == "__main__":
