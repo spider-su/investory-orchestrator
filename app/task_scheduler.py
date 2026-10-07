@@ -20,6 +20,10 @@ from app.agents.reviewer import (
 from app.tasks import TaskStatus, TaskStore
 
 
+_last_repository_poll: dict[str, float] = {}
+_READY_STATUS_MARKER = "<!-- investory-orchestrator-intake-status -->"
+
+
 def _task_status_for_workflow(workflow_status: str) -> TaskStatus | None:
     mapping = {
         "planning": TaskStatus.PLANNING,
@@ -280,6 +284,7 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
     max_builds = max(1, int(os.getenv("MAX_BUILDS", "1")))
     worker_limit = min(max_active, max_codex, max_builds)
     while True:
+        _poll_ready_issues(store)
         running: list[tuple[subprocess.Popen[str], str]] = []
         live_worker_count = 0
         active_statuses = {
@@ -427,6 +432,65 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
         time.sleep(float(os.getenv("QUEUE_POLL_SECONDS", "30")))
 
 
+def _poll_ready_issues(
+    store: TaskStore,
+    *,
+    now: float | None = None,
+    force: bool = False,
+) -> int:
+    """Queue authorized issues from enabled repositories, once per configured interval."""
+    current_time = time.monotonic() if now is None else now
+    label = os.getenv("READY_ISSUE_LABEL", "ready_to_develop").strip()
+    if not label:
+        print("READY_ISSUE_LABEL is empty; issue intake is disabled.")
+        return 0
+    queued = 0
+    for config in store.list_repositories():
+        repository = config["repository"]
+        if not config["enabled"]:
+            continue
+        interval = max(30, int(config.get("poll_interval_seconds", 60)))
+        if not force and current_time - _last_repository_poll.get(repository, float("-inf")) < interval:
+            continue
+        # Record before the request so a failing GitHub API does not hot-loop.
+        _last_repository_poll[repository] = current_time
+        try:
+            from app.github_client import GitHubAppClient
+
+            client = GitHubAppClient(repository)
+            issues = client.list_ready_issues(label)
+        except (RuntimeError, ValueError, KeyError) as error:
+            print(f"Unable to poll ready issues for {repository}: {error}")
+            continue
+        for issue in issues:
+            try:
+                existing = store.get(f"{repository}#{issue.number}")
+                task = store.create(
+                    issue_number=issue.number,
+                    title=issue.title,
+                    body=issue.body or "",
+                    source="github_issue",
+                    repository=repository,
+                    metadata={"base_branch": config["base_branch"], "ready_label": label},
+                )
+                # Removing the authorization label is an acknowledgement. If it
+                # fails, the durable task makes the next poll idempotent.
+                login = config.get("notification_login", "")
+                mention = f"@{login} " if login else ""
+                client.upsert_issue_comment(
+                    issue.number,
+                    f"{_READY_STATUS_MARKER}\n{mention}Investory Orchestrator queued this issue. "
+                    f"Current task status: **{task.status.value}**. Progress is visible in the orchestrator dashboard.",
+                    marker=_READY_STATUS_MARKER,
+                )
+                client.remove_issue_label(issue.number, label)
+                if existing is None and task.status == TaskStatus.QUEUED:
+                    queued += 1
+            except (RuntimeError, ValueError, KeyError) as error:
+                print(f"Unable to acknowledge ready issue {repository}#{issue.number}: {error}")
+    return queued
+
+
 def _notify_terminal_tasks(store: TaskStore) -> None:
     repositories = {item["repository"]: item for item in store.list_repositories()}
     candidates = store.list({TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.COMPLETED})
@@ -444,7 +508,7 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
         if task.status == TaskStatus.READY:
             body = (
                 f"{mention}Investory Orchestrator is ready for human review.\n\n"
-                f"Draft PR: {task.pr_url}\n"
+                f"PR: {task.pr_url}\n"
                 "CI is green and the final review passed. Please review and merge manually."
             )
         elif task.status == TaskStatus.COMPLETED:
@@ -463,10 +527,26 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
         try:
             from app.github_client import GitHubAppClient
 
-            GitHubAppClient(task.repository).upsert_issue_comment(
+            client = GitHubAppClient(task.repository)
+            if task.status == TaskStatus.READY and task.pr_number:
+                client.mark_pull_request_ready(task.pr_number)
+            client.upsert_issue_comment(
                 task.issue_number,
                 f"{marker}\n{body}",
                 marker=marker,
+            )
+            status_detail = (
+                f"PR ready for review: {task.pr_url}"
+                if task.status == TaskStatus.READY
+                else f"Blocked: {task.blocked_reason or 'See dashboard for details.'}"
+                if task.status == TaskStatus.BLOCKED
+                else f"Merged PR: {task.pr_url}"
+            )
+            client.upsert_issue_comment(
+                task.issue_number,
+                f"{_READY_STATUS_MARKER}\n{mention}Task status: **{task.status.value}**. "
+                f"{status_detail}",
+                marker=_READY_STATUS_MARKER,
             )
             store.transition(
                 task.task_id,

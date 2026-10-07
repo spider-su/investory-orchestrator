@@ -71,6 +71,28 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def list_ready_issues(self, label: str) -> list[Issue]:
+        """Return open issues carrying the execution-authorization label."""
+        try:
+            issues = self.get_repository().get_issues(
+                state="open", labels=[label], sort="created", direction="asc"
+            )
+            return [issue for issue in issues if not getattr(issue, "pull_request", None)]
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to list issues with label '{label}': "
+                f"{error.status} {error.data}"
+            ) from error
+
+    def remove_issue_label(self, issue_number: int, label: str) -> None:
+        try:
+            self.get_issue(issue_number).remove_from_labels(label)
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to remove label '{label}' from issue #{issue_number}: "
+                f"{error.status} {error.data}"
+            ) from error
+
     def create_issue(
         self,
         title: str,
@@ -229,6 +251,18 @@ class GitHubAppClient:
             ) from error
 
         return pull_request
+
+    def mark_pull_request_ready(self, pull_request_number: int) -> None:
+        """Promote a draft PR after all automated review and CI gates pass."""
+        try:
+            pull_request = self.get_pull_request(pull_request_number)
+            if pull_request.draft:
+                pull_request.mark_ready_for_review()
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to mark pull request #{pull_request_number} ready: "
+                f"{error.status} {error.data}"
+            ) from error
 
     def find_open_pr_by_branch(
         self,

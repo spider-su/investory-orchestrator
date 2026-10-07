@@ -18,6 +18,7 @@ data:
   MAX_CODEX_PROCESSES: "1"
   MAX_BUILDS: "1"
   QUEUE_POLL_SECONDS: "20"
+  READY_ISSUE_LABEL: ready_to_develop
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

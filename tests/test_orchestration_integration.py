@@ -27,6 +27,7 @@ class FakeGitHub:
         self.pull_requests: list[dict[str, str]] = []
         self.branch_heads: dict[str, str] = {}
         self.ci_state = "success"
+        self.ready_prs: list[int] = []
 
     def get_issue(self, issue_number: int):
         return SimpleNamespace(
@@ -49,6 +50,9 @@ class FakeGitHub:
         self.pull_requests.append({"title": title, "body": body, "head": head, "base": base})
         return FakePullRequest()
 
+    def mark_pull_request_ready(self, pr_number: int) -> None:
+        self.ready_prs.append(pr_number)
+
     def get_pull_request_ci(self, pr_number: int):
         return self.ci_state, {"run_id": 9001, "url": "https://example.test/actions/9001"}
 
@@ -59,7 +63,7 @@ class FakeGitHub:
             "url": "https://example.test/pull/23",
             "state": "open",
             "is_merged": False,
-            "is_draft": True,
+            "is_draft": pr_number not in self.ready_prs,
             "base_ref": pull_request["base"],
             "head_ref": pull_request["head"],
             "head_sha": self.branch_heads.get(pull_request["head"], "final-sha"),
@@ -209,8 +213,16 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                     notified = store.get(task.task_id)
 
         self.assertEqual(notified.metadata["terminal_notification_status"], "READY")
-        self.assertIn("@spider-su", github.comments[-1])
-        self.assertIn("Please review and merge manually", github.comments[-1])
+        terminal_comment = next(
+            comment for comment in github.comments
+            if "terminal-notification" in comment
+        )
+        self.assertIn("@spider-su", terminal_comment)
+        self.assertIn("Please review and merge manually", terminal_comment)
+        self.assertIn("PR: https://example.test/pull/23", terminal_comment)
+        self.assertNotIn("Draft PR", terminal_comment)
+        self.assertIn("PR ready for review", github.comments[-1])
+        self.assertEqual(github.ready_prs, [23])
         self.assertEqual(len(github.pull_requests), 1)
         self.assertEqual(github.pull_requests[0]["base"], "develop")
         self.assertEqual(coder.call_count, 1)

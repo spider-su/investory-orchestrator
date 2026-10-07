@@ -36,6 +36,7 @@ MAX_ACTIVE_TASKS=3
 MAX_CODEX_PROCESSES=2
 MAX_BUILDS=1
 QUEUE_POLL_SECONDS=30
+READY_ISSUE_LABEL=ready_to_develop
 PUBLISH_PLAN_COMMENT=true
 PUBLISH_REVIEW_COMMENT=true
 TARGET_ADAPTER=devcontainer_script
@@ -44,6 +45,14 @@ PLANNER_MODEL=
 CODER_MODEL=
 REVIEWER_MODEL=
 ```
+
+The scheduler polls enabled repositories at each repository's configured
+`poll_interval_seconds` (minimum 30 seconds). An open issue with the configured
+ready label is queued using its title and body; after persisting the task, the
+scheduler posts a stable status comment and removes the label. The dashboard
+shows task progress. Once CI and independent final review pass, the draft PR is
+marked ready for review and the configured GitHub login is mentioned. A human
+reviews and merges it; the scheduler then records post-merge CI and completion.
 
 Planner, coder, and reviewer all run as separate local Codex CLI invocations.
 They authenticate through the mounted Codex home directory; they do not use
