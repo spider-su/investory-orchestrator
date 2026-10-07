@@ -14,79 +14,56 @@ permissions:
   contents: read
 
 jobs:
-  docker:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+  manual-validation:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
 
+  docker-k3s:
+    name: Build and publish k3s runtime image
+    needs: manual-validation
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') &&
+      (needs.manual-validation.result == 'success' || needs.manual-validation.result == 'skipped')
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out validated source
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
-
-      - name: Set up Python for manual publish validation
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Install dependencies for manual publish validation
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: python -m pip install -r requirements.txt
-
-      - name: Run tests before manual publish
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: python -m unittest discover -s tests -p 'test_*.py'
-
+      - name: Verify Docker build inputs
+        run: |
+          test -f Dockerfile
+          test -f requirements.txt
+          test -f app/__main__.py
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: aserobaba/orchestrator
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=sha-${{ github.event.workflow_run.head_sha || github.sha }}
-
       - name: Extract k3s image metadata
-        id: k3s-meta
+        id: meta
         uses: docker/metadata-action@v6
         with:
           images: aserobaba/orchestrator
           tags: |
             type=raw,value=k3s-latest,enable={{is_default_branch}}
             type=raw,value=k3s-sha-${{ github.event.workflow_run.head_sha || github.sha }}
-
-      - name: Verify Docker build inputs
-        run: |
-          test -f Dockerfile
-          test -f requirements.txt
-          test -f app/__main__.py
-
-      - name: Build and push
-        id: image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          target: full
-          build-args: ORCHESTRATOR_BUILD_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
-          cache-from: type=gha,scope=orchestrator-full
-          cache-to: type=gha,scope=orchestrator-full,mode=max
-
       - name: Build and push k3s runtime image
-        id: k3s-image
+        id: image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -94,33 +71,11 @@ jobs:
           target: k3s
           build-args: ORCHESTRATOR_BUILD_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
           push: true
-          tags: ${{ steps.k3s-meta.outputs.tags }}
-          labels: ${{ steps.k3s-meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=orchestrator-k3s
           cache-to: type=gha,scope=orchestrator-k3s,mode=max
-
-      - name: Summarize published image
-        env:
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-          K3S_IMAGE_DIGEST: ${{ steps.k3s-image.outputs.digest }}
-          K3S_IMAGE_TAGS: ${{ steps.k3s-meta.outputs.tags }}
-        run: |
-          {
-            echo '### Published orchestrator images'
-            echo
-            echo '```text'
-            echo 'Full tooling image:'
-            printf '%s\n' "$IMAGE_TAGS"
-            echo "docker.io/aserobaba/orchestrator@${IMAGE_DIGEST}"
-            echo
-            echo 'k3s runtime image:'
-            printf '%s\n' "$K3S_IMAGE_TAGS"
-            echo "docker.io/aserobaba/orchestrator@${K3S_IMAGE_DIGEST}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Scan published image
+      - name: Scan published k3s runtime image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: aserobaba/orchestrator@${{ steps.image.outputs.digest }}
@@ -129,39 +84,12 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
-
-      - name: Scan published k3s runtime image
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: aserobaba/orchestrator@${{ steps.k3s-image.outputs.digest }}
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-
-      - name: Generate image SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: aserobaba/orchestrator@${{ steps.image.outputs.digest }}
-          artifact-name: investory-orchestrator-image.spdx.json
-          output-file: investory-orchestrator.spdx.json
-
-      - name: Upload image SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: investory-orchestrator-image-sbom
-          path: investory-orchestrator.spdx.json
-          if-no-files-found: error
-          retention-days: 7
-
       - name: Generate k3s runtime SBOM
         uses: anchore/sbom-action@v0
         with:
-          image: aserobaba/orchestrator@${{ steps.k3s-image.outputs.digest }}
+          image: aserobaba/orchestrator@${{ steps.image.outputs.digest }}
           artifact-name: investory-orchestrator-k3s-image.spdx.json
           output-file: investory-orchestrator-k3s.spdx.json
-
       - name: Upload k3s runtime SBOM
         uses: actions/upload-artifact@v7
         with:
@@ -169,3 +97,98 @@ jobs:
           path: investory-orchestrator-k3s.spdx.json
           if-no-files-found: error
           retention-days: 7
+      - name: Summarize published k3s image
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo '### Published orchestrator k3s runtime image'
+            echo
+            echo '```text'
+            printf '%s\n' "$IMAGE_TAGS"
+            echo "docker.io/aserobaba/orchestrator@${IMAGE_DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  docker-full:
+    name: Build and publish full tooling image
+    needs: manual-validation
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') &&
+      (needs.manual-validation.result == 'success' || needs.manual-validation.result == 'skipped')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      - name: Verify Docker build inputs
+        run: |
+          test -f Dockerfile
+          test -f requirements.txt
+          test -f app/__main__.py
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Extract full image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: aserobaba/orchestrator
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=sha-${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Build and push full tooling image
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: full
+          build-args: ORCHESTRATOR_BUILD_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=orchestrator-full
+          cache-to: type=gha,scope=orchestrator-full,mode=max
+      - name: Scan published full image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: aserobaba/orchestrator@${{ steps.image.outputs.digest }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - name: Generate full image SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: aserobaba/orchestrator@${{ steps.image.outputs.digest }}
+          artifact-name: investory-orchestrator-image.spdx.json
+          output-file: investory-orchestrator.spdx.json
+      - name: Upload full image SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: investory-orchestrator-image-sbom
+          path: investory-orchestrator.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Summarize published full image
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo '### Published orchestrator full tooling image'
+            echo
+            echo '```text'
+            printf '%s\n' "$IMAGE_TAGS"
+            echo "docker.io/aserobaba/orchestrator@${IMAGE_DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
