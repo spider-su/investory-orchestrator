@@ -59,9 +59,11 @@ branch is copied into each workspace so its `.git` metadata stays inside the
 directory mounted into a Dev Container. Direct prompt
 tasks use the configured target repository and do not publish issue comments.
 
-The workflow is supervised. The operator owns issue-readiness preflight and
-final pull-request approval; the scheduler records the subsequent merge and
-issue completion.
+The workflow requires human review. An approval from the configured repository
+login authorizes merge into the development branch only when it matches the
+independently reviewed head and CI is green. After post-merge CI passes, the
+scheduler opens or reuses a separate development-to-release PR. A human reviews
+and merges that promotion PR.
 
 ## Delivery stages
 
@@ -312,7 +314,9 @@ repairs remain `BLOCKED` with CI output or review findings attached to task
 metadata. Infrastructure failures also block without consuming an agent repair
 attempt.
 
-The orchestrator never merges automatically.
+The scheduler may merge a task PR only after the configured human reviewer has
+approved its exact current head and all automated gates pass. It never merges a
+release-promotion PR.
 
 ## Blocked state and resume
 

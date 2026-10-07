@@ -139,7 +139,7 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertIn("COMPLETED", output.getvalue())
         self.assertIn("Merged by: spider-su", output.getvalue())
         self.assertIn("Issue closed: True", output.getvalue())
-        self.assertIn("Task completed after human merge", output.getvalue())
+        self.assertIn("Task completed after authorized merge", output.getvalue())
         self.assertNotIn("Human action:", output.getvalue())
 
     def test_remote_worker_command_uses_quoted_configured_mac_paths(self) -> None:

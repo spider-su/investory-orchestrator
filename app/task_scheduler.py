@@ -217,7 +217,10 @@ def _print_task(task: Any) -> None:
             print("Remaining risks:")
             for problem in remaining:
                 print(f"- {problem}")
-        print("Task completed after human merge and successful post-merge CI.")
+        print(
+            "Task completed after authorized merge and successful post-merge CI. "
+            "Review the release-promotion PR separately."
+        )
     elif task.status == TaskStatus.BLOCKED:
         print(f"Blocked: {task.blocked_reason}")
         details = task.metadata.get("ci_details", [])
@@ -697,23 +700,46 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
         login = repository_config.get("notification_login", "")
         if not login:
             continue
+        promotion_status = (
+            task.metadata.get("release_promotion", {}).get("status", "not_required")
+            if task.status == TaskStatus.COMPLETED
+            else ""
+        )
+        notification_status = (
+            f"{task.status.value}:{promotion_status}"
+            if task.status == TaskStatus.COMPLETED
+            else task.status.value
+        )
         already_notified = task.metadata.get("terminal_notification_status")
-        if already_notified == task.status.value:
+        if already_notified == notification_status:
             continue
         mention = f"@{login} "
         if task.status == TaskStatus.READY:
             body = (
                 f"{mention}Investory Orchestrator is ready for human review.\n\n"
                 f"PR: {task.pr_url}\n"
-                "CI is green and the final review passed. Please review and merge manually."
+                "CI is green and the independent final review passed. Submit an "
+                "approving GitHub review to authorize the orchestrator to merge "
+                "this exact PR revision into the configured development branch."
             )
         elif task.status == TaskStatus.COMPLETED:
             completion = task.metadata.get("completion", {})
+            promotion = task.metadata.get("release_promotion", {})
+            promotion_status = promotion.get("status", "not_required")
             body = (
-                f"{mention}Investory Orchestrator recorded this task as completed.\n\n"
+                f"{mention}Task PR merged into `{completion.get('base_branch', 'develop')}` "
+                "and post-merge CI passed.\n\n"
                 f"Merged PR: {task.pr_url}\n"
                 f"Merge commit: `{completion.get('merge_commit_sha', 'unknown')}`"
             )
+            if promotion_status == "awaiting_review":
+                body += (
+                    f"\n\nRelease promotion PR: {promotion.get('pull_request_url')}\n"
+                    "It promotes the accumulated development branch to the release "
+                    "branch. Please review and merge when ready."
+                )
+            elif promotion_status == "pending":
+                body += "\n\nPreparing the development-to-release promotion PR."
         else:
             body = (
                 f"{mention}Investory Orchestrator is blocked and needs attention.\n\n"
@@ -736,7 +762,14 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
                 if task.status == TaskStatus.READY
                 else f"Blocked: {task.blocked_reason or 'See dashboard for details.'}"
                 if task.status == TaskStatus.BLOCKED
-                else f"Merged PR: {task.pr_url}"
+                else (
+                    f"Release PR awaiting review: "
+                    f"{task.metadata.get('release_promotion', {}).get('pull_request_url')}"
+                    if task.metadata.get("release_promotion", {}).get("status") == "awaiting_review"
+                    else "Preparing release promotion PR"
+                    if task.metadata.get("release_promotion", {}).get("status") == "pending"
+                    else f"Merged PR: {task.pr_url}"
+                )
             )
             client.upsert_issue_comment(
                 task.issue_number,
@@ -749,7 +782,7 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
                 task.status,
                 metadata={
                     **task.metadata,
-                    "terminal_notification_status": task.status.value,
+                    "terminal_notification_status": notification_status,
                 },
             )
         except (RuntimeError, ValueError, KeyError) as error:
@@ -803,7 +836,127 @@ def _poll_ci(store: TaskStore) -> None:
                 blocked_reason="CI failed; repair requires --resume after inspecting the saved workflow.",
                 metadata={**task.metadata, "ci_details": details},
             )
+    _poll_approved_ready_tasks(store)
     _poll_merged_tasks(store)
+    _ensure_release_promotion_prs(store)
+
+
+def _poll_approved_ready_tasks(store: TaskStore) -> None:
+    """Merge READY task PRs only after the configured user approves that exact head."""
+    from app.github_client import GitHubAppClient
+
+    release_branch = os.getenv("RELEASE_BRANCH", "main").strip() or "main"
+    merge_method = os.getenv("APPROVED_PR_MERGE_METHOD", "squash").strip()
+    for task in store.list({TaskStatus.READY}):
+        base_branch = _task_base_branch(store, task)
+        if base_branch.casefold() == release_branch.casefold():
+            continue
+        repository_config = store.get_repository(task.repository) or {}
+        reviewer = str(repository_config.get("notification_login", "")).strip()
+        if not reviewer or not task.pr_number:
+            continue
+        try:
+            client = GitHubAppClient(task.repository)
+            details = client.get_pull_request_details(task.pr_number)
+            expected_head = task.metadata.get("final_review_head_sha", "")
+            if (
+                details["state"] != "open"
+                or details["is_merged"]
+                or details["is_draft"]
+                or details["base_ref"] != base_branch
+                or details["head_ref"] != task.branch
+                or not expected_head
+                or details["head_sha"] != expected_head
+            ):
+                continue
+            approval = client.get_latest_review_approval(task.pr_number, reviewer)
+            if (
+                not approval
+                or approval["state"] != "APPROVED"
+                or approval["commit_sha"] != expected_head
+                or approval["current_head_sha"] != expected_head
+            ):
+                continue
+            ci_state, _ = client.get_pull_request_ci(task.pr_number)
+            if ci_state != "success":
+                continue
+            approval = client.merge_approved_pull_request(
+                task.pr_number,
+                reviewer_login=reviewer,
+                expected_head_sha=expected_head,
+                merge_method=merge_method,
+            )
+            current = store.get(task.task_id)
+            if current and current.status == TaskStatus.READY:
+                store.transition(
+                    current.task_id,
+                    TaskStatus.READY,
+                    metadata={**current.metadata, "approval_merge": approval},
+                )
+            print(
+                f"Merged PR #{task.pr_number} after @{reviewer} approved "
+                f"the reviewed head {expected_head}."
+            )
+        except (RuntimeError, ValueError, KeyError) as error:
+            print(f"Unable to merge approved task {task.task_id}: {error}")
+
+
+def _ensure_release_promotion_prs(store: TaskStore) -> None:
+    """Open or reuse a develop-to-main PR after task merge and post-merge CI."""
+    from app.github_client import GitHubAppClient
+
+    release_branch = os.getenv("RELEASE_BRANCH", "main").strip() or "main"
+    for task in store.list({TaskStatus.COMPLETED}):
+        promotion = task.metadata.get("release_promotion", {})
+        if promotion.get("status") != "pending":
+            continue
+        completion = task.metadata.get("completion", {})
+        development_branch = str(completion.get("base_branch", "")).strip()
+        if not development_branch or development_branch.casefold() == release_branch.casefold():
+            continue
+        try:
+            client = GitHubAppClient(task.repository)
+            pull_request = client.find_open_pr_by_branch(
+                development_branch, base=release_branch
+            )
+            if pull_request is None:
+                pull_request = client.create_release_promotion_pr(
+                    head=development_branch,
+                    base=release_branch,
+                )
+            issue_link = (
+                f"https://github.com/{task.repository}/issues/{task.issue_number}"
+                if task.issue_number is not None
+                else task.repository
+            )
+            marker = "<!-- investory-orchestrator-release-promotion -->"
+            client.upsert_issue_comment(
+                pull_request.number,
+                f"{marker}\nTask PR [#{task.pr_number}]({task.pr_url}) for "
+                f"[{task.repository} issue #{task.issue_number}]({issue_link}) "
+                f"merged into `{development_branch}` with successful post-merge CI. "
+                f"This PR promotes accumulated `{development_branch}` changes to "
+                f"`{release_branch}`; review and merge it manually when ready.",
+                marker=marker,
+            )
+            current = store.get(task.task_id)
+            if current and current.status == TaskStatus.COMPLETED:
+                store.transition(
+                    current.task_id,
+                    TaskStatus.COMPLETED,
+                    metadata={
+                        **current.metadata,
+                        "release_promotion": {
+                            "status": "awaiting_review",
+                            "pull_request_number": pull_request.number,
+                            "pull_request_url": pull_request.html_url,
+                            "head_branch": development_branch,
+                            "base_branch": release_branch,
+                        },
+                    },
+                )
+        except (RuntimeError, ValueError, KeyError) as error:
+            print(f"Unable to prepare release promotion for {task.task_id}: {error}")
 
 
 def _task_base_branch(store: TaskStore, task: Any) -> str:
@@ -881,7 +1034,18 @@ def _record_merged_task(
             "post_merge_ci_status": ci_state,
             "post_merge_ci_details": merge_checks,
             "issue_closed": issue_closed,
+            **(
+                {"approval_review": task.metadata["approval_merge"]}
+                if task.metadata.get("approval_merge")
+                else {}
+            ),
         },
+        "release_promotion": (
+            {"status": "pending", "base_branch": expected_base}
+            if expected_base.casefold()
+            != (os.getenv("RELEASE_BRANCH", "main").strip() or "main").casefold()
+            else {"status": "not_required"}
+        ),
     }
     store.transition(
         task.task_id,
@@ -918,7 +1082,16 @@ def _poll_merged_tasks(store: TaskStore) -> None:
                     )
                 _record_merged_task(
                     store, task, client, details, merge_checks,
-                    source="human_merge", recorded_via="scheduler_poll",
+                    source=(
+                        "approved_review"
+                        if task.metadata.get("approval_merge")
+                        else "human_merge"
+                    ),
+                    recorded_via=(
+                        "scheduler_approved_review"
+                        if task.metadata.get("approval_merge")
+                        else "scheduler_poll"
+                    ),
                     ci_state=merge_state,
                 )
             elif details["state"] == "closed":

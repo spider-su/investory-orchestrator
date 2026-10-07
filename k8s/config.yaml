@@ -11,6 +11,8 @@ data:
   GITHUB_NOTIFY_LOGIN: spider-su
   GITHUB_PRIORITY_FIELD: Priority
   BASE_BRANCH: develop
+  RELEASE_BRANCH: main
+  APPROVED_PR_MERGE_METHOD: squash
   MAC_SSH_TARGET: alex@192.168.1.7
   MAC_SSH_KEY_PATH: /run/secrets/mac-runner/id_ed25519
   MAC_SSH_KNOWN_HOSTS: /run/secrets/mac-runner/known_hosts

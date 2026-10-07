@@ -28,6 +28,11 @@ class FakeGitHub:
         self.branch_heads: dict[str, str] = {}
         self.ci_state = "success"
         self.ready_prs: list[int] = []
+        self.approval: dict[str, str] | None = None
+        self.merged = False
+        self.merge_calls: list[dict[str, str]] = []
+        self.release_prs: list[dict[str, str]] = []
+        self.closed_issues: list[int] = []
 
     def get_issue(self, issue_number: int):
         return SimpleNamespace(
@@ -37,13 +42,17 @@ class FakeGitHub:
         )
 
     def upsert_issue_comment(self, issue_number: int, body: str, *, marker: str) -> int:
+        for index, current in enumerate(self.comments):
+            if marker in current:
+                self.comments[index] = body
+                return index + 1
         self.comments.append(body)
         return len(self.comments)
 
     def get_branch_head_sha(self, branch: str) -> str | None:
         return self.branch_heads.get(branch)
 
-    def find_open_pr_by_branch(self, branch: str):
+    def find_open_pr_by_branch(self, branch: str, *, base: str | None = None):
         return None
 
     def create_draft_pr(self, *, title: str, body: str, head: str, base: str):
@@ -52,6 +61,35 @@ class FakeGitHub:
 
     def mark_pull_request_ready(self, pr_number: int) -> None:
         self.ready_prs.append(pr_number)
+
+    def get_latest_review_approval(self, pr_number: int, reviewer_login: str):
+        return self.approval
+
+    def merge_approved_pull_request(
+        self, pr_number: int, *, reviewer_login: str,
+        expected_head_sha: str, merge_method: str,
+    ):
+        self.merge_calls.append({
+            "reviewer": reviewer_login,
+            "head": expected_head_sha,
+            "method": merge_method,
+        })
+        self.merged = True
+        return dict(self.approval or {})
+
+    def get_commit_ci(self, commit_sha: str):
+        return self.ci_state, [{"sha": commit_sha}]
+
+    def close_issue(self, issue_number: int):
+        self.closed_issues.append(issue_number)
+        return True
+
+    def create_release_promotion_pr(self, *, head: str, base: str):
+        self.release_prs.append({"head": head, "base": base})
+        return SimpleNamespace(
+            number=24,
+            html_url="https://example.test/pull/24",
+        )
 
     def get_pull_request_ci(self, pr_number: int):
         return self.ci_state, {"run_id": 9001, "url": "https://example.test/actions/9001"}
@@ -62,14 +100,14 @@ class FakeGitHub:
             "number": pr_number,
             "url": "https://example.test/pull/23",
             "state": "open",
-            "is_merged": False,
+            "is_merged": self.merged,
             "is_draft": pr_number not in self.ready_prs,
             "base_ref": pull_request["base"],
             "head_ref": pull_request["head"],
             "head_sha": self.branch_heads.get(pull_request["head"], "final-sha"),
-            "merge_commit_sha": None,
-            "merged_at": "",
-            "merged_by": "",
+            "merge_commit_sha": "c" * 40 if self.merged else None,
+            "merged_at": "2026-10-07T12:00:00Z" if self.merged else "",
+            "merged_by": "investory-orchestrator[bot]" if self.merged else "",
             "title": pull_request["title"],
             "body": pull_request["body"],
         }
@@ -125,7 +163,7 @@ class OrchestrationIntegrationTests(unittest.TestCase):
         self.assertIn("blocked and needs attention", terminal[0])
         self.assertEqual(blocked.metadata["terminal_notification_status"], "BLOCKED")
 
-    def test_issue_runs_through_graph_ci_final_review_and_ready_notification(self) -> None:
+    def test_issue_approval_merges_develop_and_opens_release_pr(self) -> None:
         github = FakeGitHub()
         plan = ImplementationPlan(
             goal="Complete the fixture",
@@ -152,6 +190,7 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                 "TASK_DB": str(root / "tasks.db"),
                 "CHECKPOINT_DB": str(root / "checkpoints.db"),
                 "GITHUB_REPOSITORY": "spider-su/investory",
+                "GITHUB_APP_ID": "test-app",
                 "BASE_BRANCH": "develop",
                 "PUBLISH_PLAN_COMMENT": "true",
                 "PUBLISH_REVIEW_COMMENT": "true",
@@ -190,7 +229,17 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                     stack.enter_context(patch("app.graph.push_branch", side_effect=lambda *args, **kwargs: github.branch_heads.update({"agent/issue-42": "final-sha"})))
                     final_review = stack.enter_context(patch("app.agents.reviewer.review_implementation", return_value=approved))
                     stack.enter_context(patch("app.agents.reviewer.review_identity", return_value={"backend": "codex-cli", "provider": "codex-cli", "model": "codex-reviewer"}))
-                    stack.enter_context(patch("app.task_scheduler.subprocess.run", return_value=SimpleNamespace(stdout="")))
+                    def git_output(command, **kwargs):
+                        if command[:2] == ["git", "rev-parse"]:
+                            return SimpleNamespace(stdout="final-sha")
+                        if command[:2] == ["git", "branch"]:
+                            return SimpleNamespace(stdout="agent/issue-42")
+                        return SimpleNamespace(stdout="")
+
+                    stack.enter_context(patch(
+                        "app.task_scheduler.subprocess.run",
+                        side_effect=git_output,
+                    ))
                     run_cli(
                         build_graph=build_graph,
                         resolve_resume_from=resolve_resume_from,
@@ -210,18 +259,78 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                     self.assertTrue(all(ready.metadata["ready_gates"].values()))
 
                     _notify_terminal_tasks(store)
-                    notified = store.get(task.task_id)
+                    ready_notified = store.get(task.task_id)
+                    ready_notification = next(
+                        comment for comment in github.comments
+                        if "terminal-notification" in comment
+                    )
 
-        self.assertEqual(notified.metadata["terminal_notification_status"], "READY")
+                    github.approval = {
+                        "reviewer": "spider-su",
+                        "state": "APPROVED",
+                        "commit_sha": "final-sha",
+                        "current_head_sha": "final-sha",
+                        "review_id": "7001",
+                        "submitted_at": "2026-10-07T12:00:00Z",
+                    }
+                    self.assertEqual(
+                        ready.metadata.get("final_review_head_sha"), "final-sha"
+                    )
+                    _poll_ci(store)
+                    completed = store.get(task.task_id)
+                    store.transition(
+                        task.task_id,
+                        TaskStatus.COMPLETED,
+                        metadata={
+                            **completed.metadata,
+                            "release_promotion": {
+                                **completed.metadata["release_promotion"],
+                                "status": "pending",
+                            },
+                        },
+                    )
+                    _notify_terminal_tasks(store)
+                    pending_notification = next(
+                        comment for comment in github.comments
+                        if "terminal-notification" in comment
+                    )
+                    pending = store.get(task.task_id)
+                    store.transition(
+                        task.task_id,
+                        TaskStatus.COMPLETED,
+                        metadata={
+                            **pending.metadata,
+                            "release_promotion": {
+                                **pending.metadata["release_promotion"],
+                                "status": "awaiting_review",
+                            },
+                        },
+                    )
+                    _notify_terminal_tasks(store)
+
+        self.assertEqual(ready_notified.status, TaskStatus.READY)
+        self.assertEqual(completed.status, TaskStatus.COMPLETED)
+        self.assertEqual(completed.metadata["completion"]["source"], "approved_review")
+        self.assertEqual(completed.metadata["completion"]["approval_review"]["review_id"], "7001")
+        self.assertTrue(completed.metadata["completion"]["issue_closed"])
+        self.assertEqual(
+            completed.metadata["release_promotion"]["status"], "awaiting_review"
+        )
+        self.assertEqual(completed.metadata["release_promotion"]["pull_request_number"], 24)
+        self.assertEqual(github.merge_calls[0]["reviewer"], "spider-su")
+        self.assertEqual(github.merge_calls[0]["head"], "final-sha")
+        self.assertEqual(github.release_prs, [{"head": "develop", "base": "main"}])
+        self.assertEqual(github.closed_issues, [42])
         terminal_comment = next(
             comment for comment in github.comments
             if "terminal-notification" in comment
         )
         self.assertIn("@spider-su", terminal_comment)
-        self.assertIn("Please review and merge manually", terminal_comment)
-        self.assertIn("PR: https://example.test/pull/23", terminal_comment)
+        self.assertIn("Merged PR: https://example.test/pull/23", terminal_comment)
         self.assertNotIn("Draft PR", terminal_comment)
-        self.assertIn("PR ready for review", github.comments[-1])
+        self.assertIn("Release promotion PR: https://example.test/pull/24", terminal_comment)
+        self.assertIn("Preparing the development-to-release promotion PR.", pending_notification)
+        self.assertIn("approving GitHub review", ready_notification)
         self.assertEqual(github.ready_prs, [23])
         self.assertEqual(len(github.pull_requests), 1)
         self.assertEqual(github.pull_requests[0]["base"], "develop")
