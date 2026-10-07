@@ -23,6 +23,7 @@ data:
   RUNNER_HEALTH_CHECK_SECONDS: "60"
   WORKER_HEARTBEAT_SECONDS: "20"
   READY_ISSUE_LABEL: ready_to_develop
+  SLACK_CHANNEL_ID: C0C7CFQP6LB
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

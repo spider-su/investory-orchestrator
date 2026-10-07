@@ -449,6 +449,22 @@ def _remote_worker_is_running(task_id: str) -> bool:
         return True
 
 
+def _publish_pending_slack_activity(store: TaskStore) -> None:
+    if not os.getenv("SLACK_BOT_TOKEN", "").strip() or not os.getenv(
+        "SLACK_CHANNEL_ID", ""
+    ).strip():
+        return
+    from app.slack_notifier import publish_task_activity
+
+    for activity in store.list_pending_activity(limit=50):
+        try:
+            if publish_task_activity(activity):
+                store.mark_activity_sent(activity["activity_id"])
+        except Exception as error:
+            print(f"Unable to deliver task activity to Slack ({type(error).__name__}).")
+            return
+
+
 def run_queue(store: TaskStore, *, once: bool = False) -> None:
     """Run queued tasks, then poll CI for tasks whose worker has exited."""
     max_active = max(1, int(os.getenv("MAX_ACTIVE_TASKS", "3")))
@@ -456,6 +472,7 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
     max_builds = max(1, int(os.getenv("MAX_BUILDS", "1")))
     worker_limit = min(max_active, max_codex, max_builds)
     while True:
+        _publish_pending_slack_activity(store)
         _poll_ready_issues(store)
         _refresh_runner_health(store)
         running: list[tuple[subprocess.Popen[str], str]] = []

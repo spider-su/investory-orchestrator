@@ -48,12 +48,21 @@ kubectl -n investory-orchestrator create secret generic orchestrator-runtime \
   --from-literal=dashboard-api-token="$DASHBOARD_API_TOKEN" \
   --from-literal=github-installation-id="$GITHUB_INSTALLATION_ID" \
   --from-file=github-app-private-key=/secure/path/github-app.pem
+python3 -c 'import getpass, subprocess; token=getpass.getpass("Slack bot token (input hidden): ").strip(); subprocess.run(["kubectl", "-n", "investory-orchestrator", "create", "secret", "generic", "orchestrator-slack", "--from-file=bot-token=/dev/stdin"], input=token.encode(), check=True)'
 ```
 
 `DATABASE_URL` must connect to the existing `postgres.postgres.svc.cluster.local`
 service and use a role allowed to create and use the dedicated schema. Use the
 same DSN in the Mac `.env`. Do not paste secret values into manifests or source
 control.
+
+Slack task updates are delivered centrally by the Kubernetes scheduler from
+the shared task activity log. The bot token is stored only in the
+`orchestrator-slack` Kubernetes Secret; the channel ID is non-secret
+configuration in `k8s/config.yaml`. The Slack app needs the `chat:write` and
+`chat:write.customize` bot scopes and must be a member of `#orchestrator`. The
+Mac runner does not need either Slack credential. Do not put tokens in this
+repository. The app-level `xapp` token is not needed for these outbound posts.
 
 On devMac, update the orchestrator checkout to the release used for the
 container image, install its requirements in the configured virtualenv, and

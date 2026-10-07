@@ -34,6 +34,11 @@ spec:
                 secretKeyRef:
                   name: orchestrator-runtime
                   key: github-installation-id
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-slack
+                  key: bot-token
           volumeMounts:
             - name: mac-runner
               mountPath: /run/secrets/mac-runner

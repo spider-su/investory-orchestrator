@@ -256,6 +256,7 @@ class TaskStore:
                     event_type TEXT NOT NULL,
                     message TEXT NOT NULL,
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    slack_sent_at DOUBLE PRECISION,
                     created_at DOUBLE PRECISION NOT NULL
                 )""" if self.is_postgres else """CREATE TABLE IF NOT EXISTS task_activity (
                     activity_id TEXT PRIMARY KEY,
@@ -264,9 +265,25 @@ class TaskStore:
                     event_type TEXT NOT NULL,
                     message TEXT NOT NULL,
                     metadata TEXT NOT NULL DEFAULT '{}',
+                    slack_sent_at REAL,
                     created_at REAL NOT NULL
                 )"""
             )
+            if self.is_postgres:
+                connection.execute(
+                    "ALTER TABLE task_activity ADD COLUMN IF NOT EXISTS slack_sent_at DOUBLE PRECISION"
+                )
+            else:
+                activity_columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(task_activity)"
+                    ).fetchall()
+                }
+                if "slack_sent_at" not in activity_columns:
+                    connection.execute(
+                        "ALTER TABLE task_activity ADD COLUMN slack_sent_at REAL"
+                    )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS task_activity_task_created "
                 "ON task_activity(task_id, created_at, activity_id)"
@@ -518,6 +535,31 @@ class TaskStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (uuid.uuid4().hex, task_id, actor, event_type, message,
                  activity_metadata, now),
+            )
+
+    def list_pending_activity(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                "SELECT activity_id, task_id, actor, event_type, message, metadata, created_at "
+                "FROM task_activity WHERE slack_sent_at IS NULL "
+                "ORDER BY created_at, activity_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            entry = dict(row)
+            if isinstance(entry["metadata"], str):
+                entry["metadata"] = json.loads(entry["metadata"] or "{}")
+            result.append(entry)
+        return result
+
+    def mark_activity_sent(self, activity_id: str) -> None:
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                "UPDATE task_activity SET slack_sent_at=? WHERE activity_id=?",
+                (time.time(), activity_id),
             )
 
     def list_activity(self, task_id: str) -> list[dict[str, Any]]:
