@@ -23,5 +23,5 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Run project validation
+        run: sh scripts/ci-validate.sh

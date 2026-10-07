@@ -7,14 +7,16 @@ recovery. Workflow design is documented in [`architecture.md`](architecture.md).
 
 Before starting a run:
 
-1. Manually verify the issue against [`issue-contract.md`](issue-contract.md).
+1. Complete the issue contract in [`issue-contract.md`](issue-contract.md). The
+   scheduler validates labeled GitHub issues before creating a task or workspace.
 2. Verify GitHub App credentials and repository configuration.
 3. Verify the coding backend is authenticated and has available quota.
 4. Confirm the target repository supplies its Dev Container and validation
    entry point.
 
-The current CLI does not reject an invalid issue before workspace creation or
-planner invocation.
+Issues that fail preflight remain labeled and receive an issue comment listing
+the required corrections. The scheduler retries validation during later issue
+polls.
 
 ## Configuration
 
@@ -47,12 +49,15 @@ REVIEWER_MODEL=
 ```
 
 The scheduler polls enabled repositories at each repository's configured
-`poll_interval_seconds` (minimum 30 seconds). An open issue with the configured
-ready label is queued using its title and body; after persisting the task, the
-scheduler posts a stable status comment and removes the label. The dashboard
-shows task progress. Once CI and independent final review pass, the draft PR is
-marked ready for review and the configured GitHub login is mentioned. A human
-reviews and merges it; the scheduler then records post-merge CI and completion.
+`poll_interval_seconds` (minimum 30 seconds). Before task creation, it checks
+the issue contract in [`issue-contract.md`](issue-contract.md). An invalid
+issue gets a corrective comment; its ready label stays in place, and no task,
+workspace, or Codex invocation is created. A valid issue is persisted, then
+receives a stable status comment and has its label removed. The dashboard shows
+task progress and Mac runner/queue health. Once CI and independent final review
+pass, the draft PR is marked ready for review and the configured GitHub login
+is mentioned. A human reviews and merges it; the scheduler then records
+post-merge CI and completion.
 
 Planner, coder, and reviewer all run as separate local Codex CLI invocations.
 They authenticate through the mounted Codex home directory; they do not use
@@ -87,6 +92,21 @@ limits. A task in `WAITING_CI` has no active worker. The scheduler polls GitHub
 Actions and commit statuses, starts bounded CI/final-review repair, and marks a
 task `READY` only after all required checks pass. `--once` is intended for
 supervised runs; omit it for continuous polling.
+
+In the k3s/Mac deployment, scheduler health probes the Mac over SSH every
+`RUNNER_HEALTH_CHECK_SECONDS` (default 60). The probe checks runner tools and
+authentication, writable workspaces, a clean checkout, and that the runner
+checkout matches the scheduler image revision. Dispatch pauses while the
+runner is unavailable; inspect the dashboard's **Runner and queue** card,
+repair connectivity/authentication, and deploy matching code on the Mac.
+
+Quota or authentication failures pause new Codex dispatch globally instead of
+letting each issue fail in turn. After resolving the cause, clear that pause
+with `python -m app --resume-queue`.
+
+The scheduler records worker lease owner, PID, start time, and heartbeats in
+task metadata. SSH keepalives and the Mac-side task lock allow the scheduler to
+distinguish a dropped SSH session from a still-running worker.
 
 In the split k3s/Mac deployment, final review is sent to the Mac runner over
 SSH. The runner checks that its workspace is clean and that its branch and
@@ -297,27 +317,11 @@ it and the resulting state is reconciled with the workflow checkpoint.
 
 ## Operational checks
 
-Compile the orchestrator modules:
+Run the same project validation used by CI (compile every Python module and
+run all unit tests):
 
 ```bash
-docker compose run --rm orchestrator \
-  python -m py_compile \
-  app/state.py \
-  app/github_client.py \
-  app/workspace.py \
-  app/repository_context.py \
-  app/test_runner.py \
-  app/agents/planner.py \
-  app/agents/coder.py \
-  app/agents/reviewer.py \
-  app/graph.py
-```
-
-Run the orchestrator test suite:
-
-```bash
-docker compose run --rm orchestrator \
-  python -m unittest discover -s tests -p 'test_*.py'
+docker compose run --rm --entrypoint sh orchestrator scripts/ci-validate.sh
 ```
 
 Both `app/` and `tests/` are bind-mounted by Compose, so local source and test

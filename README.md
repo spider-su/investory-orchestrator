@@ -23,9 +23,6 @@ verification, and production-readiness status.
 The k3s scheduler, PostgreSQL, devMac SSH runner, dashboard, and deployment
 setup are documented in [`docs/k3s-poc.md`](docs/k3s-poc.md).
 
-The k3s scheduler, PostgreSQL, devMac SSH runner, dashboard, and deployment
-setup are documented in [`docs/k3s-poc.md`](docs/k3s-poc.md).
-
 ## What it does
 
 ```text
@@ -47,9 +44,10 @@ final history rewriting. These features are described in
 
 ## Quick start
 
-Before running the orchestrator, manually verify the issue against
-[`docs/issue-contract.md`](docs/issue-contract.md). The CLI does not yet reject
-an invalid issue before workspace creation or planner invocation.
+GitHub issues with the configured ready label are checked against
+[`docs/issue-contract.md`](docs/issue-contract.md) before they are queued. An
+invalid issue receives a comment explaining the missing information; its ready
+label remains in place, and no workspace or Codex process is started.
 
 Queue an issue or a direct task:
 

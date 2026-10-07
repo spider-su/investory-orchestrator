@@ -5,9 +5,11 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +19,16 @@ from app.agents.reviewer import (
     review_identity,
     review_implementation,
 )
+from app.issue_validation import validate_issue_contract
 from app.tasks import TaskStatus, TaskStore
 
 
 _last_repository_poll: dict[str, float] = {}
+_last_runner_health_check = 0.0
+_SCHEDULER_OWNER = (
+    os.getenv("POD_UID")
+    or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+)
 _READY_STATUS_MARKER = "<!-- investory-orchestrator-intake-status -->"
 
 
@@ -235,6 +243,9 @@ def _ssh_command(remote_args: list[str]) -> list[str]:
         "ssh", "-T", "-i", identity,
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
         "-o", f"UserKnownHostsFile={known_hosts}",
         target, shlex.join(remote_args),
     ]
@@ -253,7 +264,117 @@ def _remote_worker_command(task: Any) -> list[str]:
         or task.metadata.get("final_review_status") == "changes_required"
     )
     args.append("1" if ci_repair else "0")
+    args.append(os.getenv("ORCHESTRATOR_BUILD_SHA", "unknown"))
     return _ssh_command(args)
+
+
+def _log_event(
+    event: str,
+    *,
+    task_id: str = "",
+    node: str = "scheduler",
+    **fields: Any,
+) -> None:
+    print(json.dumps({
+        "timestamp": time.time(),
+        "task_id": task_id,
+        "node": node,
+        "event": event,
+        **fields,
+    }, separators=(",", ":"), default=str), flush=True)
+
+
+def _refresh_runner_health(store: TaskStore, *, force: bool = False) -> None:
+    global _last_runner_health_check
+    now = time.monotonic()
+    period = max(15, int(os.getenv("RUNNER_HEALTH_CHECK_SECONDS", "60")))
+    if not force and now - _last_runner_health_check < period:
+        return
+    _last_runner_health_check = now
+    if not _ssh_target():
+        store.set_service_status(
+            "runner", "ready", "Local worker mode; remote Mac health check is disabled.",
+            {"mode": "local"},
+        )
+        return
+
+    expected_sha = os.getenv("ORCHESTRATOR_BUILD_SHA", "unknown")
+    try:
+        result = subprocess.run(
+            _ssh_command(["health", expected_sha]),
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        ready = result.returncode == 0 and report.get("status") == "ready"
+        store.set_service_status(
+            "runner",
+            "ready" if ready else "unavailable",
+            report.get("detail", "Mac runner health checks failed."),
+            report,
+        )
+        _log_event(
+            "runner_health", node="scheduler",
+            status="ready" if ready else "unavailable",
+            checks=report.get("checks", {}),
+        )
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError, KeyError, IndexError) as error:
+        store.set_service_status(
+            "runner", "unavailable", f"Mac health probe failed: {error}",
+            {"mode": "mac_ssh"},
+        )
+        _log_event("runner_health", node="scheduler", status="unavailable", error=str(error))
+
+
+def _codex_outage_category(reason: str) -> str | None:
+    normalized = reason.casefold()
+    auth_patterns = (
+        "codex authentication unavailable", "not logged in", "login required",
+        "authentication required", "not authenticated", "please login",
+        "run codex login", "login expired", "unauthorized", "invalid api key", "token expired",
+        "401 unauthorized", " 401",
+    )
+    quota_patterns = (
+        "insufficient_quota", "usage limit", "usage cap", "quota exceeded", "rate limit",
+        "rate_limit_exceeded",
+        "too many requests", "plan limit", " 429", "http 429",
+    )
+    if any(pattern in normalized for pattern in auth_patterns):
+        return "authentication"
+    if any(pattern in normalized for pattern in quota_patterns):
+        return "quota"
+    return None
+
+
+def _pause_on_codex_outage(store: TaskStore, task: Any) -> None:
+    reason = task.blocked_reason or str(task.metadata.get("error", ""))
+    category = _codex_outage_category(reason)
+    if not category:
+        return
+    detail = (
+        "Codex authentication failed. Repair the Mac Codex login, then run "
+        "`python -m app --resume-queue`."
+        if category == "authentication"
+        else "Codex usage is rate limited or exhausted. Wait for quota recovery, "
+        "then run `python -m app --resume-queue`."
+    )
+    store.set_service_status(
+        "codex_queue", "paused", detail,
+        {"category": category, "task_id": task.task_id},
+    )
+    _log_event("queue_paused", task_id=task.task_id, category=category)
+
+
+def _dispatch_pause_reason(store: TaskStore) -> str:
+    runner = store.get_service_status("runner")
+    if runner and runner["status"] != "ready":
+        return runner["detail"] or "Mac runner is unavailable."
+    codex_queue = store.get_service_status("codex_queue")
+    if codex_queue and codex_queue["status"] == "paused":
+        return codex_queue["detail"] or "Codex queue is paused."
+    return ""
 
 
 def _remote_worker_is_running(task_id: str) -> bool:
@@ -285,6 +406,7 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
     worker_limit = min(max_active, max_codex, max_builds)
     while True:
         _poll_ready_issues(store)
+        _refresh_runner_health(store)
         running: list[tuple[subprocess.Popen[str], str]] = []
         live_worker_count = 0
         active_statuses = {
@@ -296,7 +418,8 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
         }
         for active in store.list(active_statuses):
             pid = active.metadata.get("worker_pid")
-            if _pid_alive(pid):
+            lease_owner = active.metadata.get("lease_owner")
+            if _pid_alive(pid) and (not lease_owner or lease_owner == _SCHEDULER_OWNER):
                 live_worker_count += 1
                 continue
             if (
@@ -312,6 +435,9 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                 blocked_reason="Worker stopped unexpectedly; recovering its saved checkpoint.",
                 metadata={**active.metadata, "recovery_pending": True},
             )
+            recovered = store.get(active.task_id)
+            if recovered:
+                _pause_on_codex_outage(store, recovered)
         repositories = {
             item["repository"]: item
             for item in store.list_repositories()
@@ -334,6 +460,10 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                 ) or task.metadata.get("recovery_pending", False)
             )
         )
+        pause_reason = _dispatch_pause_reason(store)
+        if pause_reason:
+            candidates = []
+            _log_event("dispatch_paused", reason=pause_reason)
         for task in candidates:
             if len(running) + live_worker_count >= worker_limit:
                 break
@@ -398,14 +528,36 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                     **current.metadata,
                     "worker_pid": process.pid,
                     "worker_mode": "mac_ssh" if remote_target else "local",
+                    "lease_owner": _SCHEDULER_OWNER,
+                    "lease_started_at": time.time(),
+                    "worker_heartbeat_at": time.time(),
                 },
+            )
+            _log_event(
+                "worker_started", task_id=task.task_id,
+                worker_mode="mac_ssh" if remote_target else "local",
+                pid=process.pid,
             )
             # At most one worker is started per scheduler iteration when the
             # build limit is one. The task remains durable if the process dies.
         for process, task_id in running:
-            code = process.wait()
+            code = _wait_for_worker(store, process, task_id)
+            current = store.get(task_id)
+            if current and current.status == TaskStatus.BLOCKED:
+                _pause_on_codex_outage(store, current)
             if code:
                 current = store.get(task_id)
+                remote_worker_active = bool(
+                    current
+                    and current.metadata.get("worker_mode") == "mac_ssh"
+                    and _remote_worker_is_running(task_id)
+                )
+                if remote_worker_active:
+                    _log_event(
+                        "ssh_session_lost_worker_active", task_id=task_id,
+                        exit_code=code,
+                    )
+                    continue
                 if current and current.status not in {
                     TaskStatus.BLOCKED,
                     TaskStatus.FAILED,
@@ -425,11 +577,34 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
                             "recovery_pending": False,
                         },
                     )
+                _log_event("worker_exited", task_id=task_id, exit_code=code)
         _poll_ci(store)
         _notify_terminal_tasks(store)
         if once:
             return
         time.sleep(float(os.getenv("QUEUE_POLL_SECONDS", "30")))
+
+
+def _wait_for_worker(
+    store: TaskStore,
+    process: subprocess.Popen[str],
+    task_id: str,
+) -> int:
+    poll = getattr(process, "poll", None)
+    if not callable(poll):
+        return process.wait()
+    interval = max(5, int(os.getenv("WORKER_HEARTBEAT_SECONDS", "20")))
+    last_heartbeat = time.monotonic()
+    while True:
+        result = poll()
+        if result is not None:
+            return result
+        now = time.monotonic()
+        if now - last_heartbeat >= interval:
+            store.heartbeat_worker(task_id, _SCHEDULER_OWNER, process.pid)
+            _log_event("worker_heartbeat", task_id=task_id)
+            last_heartbeat = now
+        time.sleep(min(2, interval))
 
 
 def _poll_ready_issues(
@@ -465,6 +640,29 @@ def _poll_ready_issues(
         for issue in issues:
             try:
                 existing = store.get(f"{repository}#{issue.number}")
+                login = config.get("notification_login", "")
+                mention = f"@{login} " if login else ""
+                if existing is None:
+                    issue_labels = tuple(
+                        getattr(item, "name", str(item))
+                        for item in getattr(issue, "labels", ())
+                    )
+                    validation = validate_issue_contract(
+                        issue.title or "", issue.body or "", issue_labels
+                    )
+                    if not validation.valid:
+                        details = "\n".join(f"- {error}" for error in validation.errors)
+                        client.upsert_issue_comment(
+                            issue.number,
+                            f"{_READY_STATUS_MARKER}\n{mention}Issue not queued: it "
+                            "does not yet meet the ready-to-develop contract.\n\n"
+                            f"{details}\n\n"
+                            f"The `{label}` label remains in place. Update the issue "
+                            "and it will be checked again. No workspace or Codex run "
+                            "was started.",
+                            marker=_READY_STATUS_MARKER,
+                        )
+                        continue
                 task = store.create(
                     issue_number=issue.number,
                     title=issue.title,
@@ -475,8 +673,6 @@ def _poll_ready_issues(
                 )
                 # Removing the authorization label is an acknowledgement. If it
                 # fails, the durable task makes the next poll idempotent.
-                login = config.get("notification_login", "")
-                mention = f"@{login} " if login else ""
                 client.upsert_issue_comment(
                     issue.number,
                     f"{_READY_STATUS_MARKER}\n{mention}Investory Orchestrator queued this issue. "

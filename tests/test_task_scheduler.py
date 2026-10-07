@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,17 +10,49 @@ from unittest.mock import patch
 
 from app.task_scheduler import (
     _print_task,
+    _dispatch_pause_reason,
+    _pause_on_codex_outage,
     _poll_ci,
     _notify_terminal_tasks,
     _poll_ready_issues,
     _remote_worker_command,
     _remote_worker_is_running,
+    _refresh_runner_health,
     _sync_task_result,
     _track_task_state,
     reconcile_merged_task,
     run_queue,
 )
 from app.tasks import TaskStatus, TaskStore
+
+
+VALID_READY_ISSUE_BODY = """## Goal
+Implement the requested behavior.
+
+## Context
+The current behavior does not satisfy the requested outcome.
+
+## Product decisions
+Keep the existing user-visible behavior unless the acceptance criteria say otherwise.
+
+## Scope
+### In scope
+- Implement the requested behavior.
+### Out of scope
+- Unrelated product changes.
+
+## Acceptance criteria
+- The requested behavior is observable.
+
+## Validation
+- Run focused automated tests.
+
+## Change constraints
+- Database migration allowed: no
+- Breaking API change allowed: no
+- Dependency changes allowed: no
+- Configuration changes allowed: no
+"""
 
 
 class TaskSchedulerTests(unittest.TestCase):
@@ -124,7 +157,7 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual(command[0], "ssh")
         self.assertIn("StrictHostKeyChecking=yes", command)
         self.assertIn("codex@192.168.1.7", command)
-        self.assertEqual(command[-1], "run 42 42 - 0 0")
+        self.assertEqual(command[-1], "run 42 42 - 0 0 unknown")
 
     def test_remote_worker_rejects_invalid_ssh_target(self) -> None:
         task = self.store.create(title="remote", issue_number=43)
@@ -135,6 +168,45 @@ class TaskSchedulerTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "SSH user and host"):
                 _remote_worker_command(task)
+
+    def test_runner_health_is_persisted_for_dashboard(self) -> None:
+        report = {
+            "status": "ready",
+            "detail": "Mac runner ready at 123456789abc (codex 1.2.3).",
+            "checks": {"ssh": True, "codex_authenticated": True},
+        }
+        with (
+            patch.dict(os.environ, {
+                "MAC_SSH_TARGET": "codex@192.168.1.7",
+                "ORCHESTRATOR_BUILD_SHA": "a" * 40,
+            }),
+            patch(
+                "app.task_scheduler.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout=json.dumps(report)),
+            ) as run,
+        ):
+            _refresh_runner_health(self.store, force=True)
+
+        self.assertIn("health", run.call_args.args[0][-1])
+        status = self.store.get_service_status("runner")
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(status["metadata"]["checks"]["ssh"], True)
+
+    def test_codex_quota_failure_pauses_dispatch_globally(self) -> None:
+        task = self.store.create(title="Codex quota")
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED,
+            blocked_reason="Codex failed: 429 rate_limit_exceeded",
+        )
+
+        _pause_on_codex_outage(self.store, task)
+
+        status = self.store.get_service_status("codex_queue")
+        self.assertEqual(status["status"], "paused")
+        self.assertEqual(status["metadata"]["category"], "quota")
+        self.assertIn("Wait for quota recovery", _dispatch_pause_reason(self.store))
 
     def test_remote_probe_fails_closed_on_ssh_error(self) -> None:
         with (
@@ -171,7 +243,7 @@ class TaskSchedulerTests(unittest.TestCase):
             "base_branch": "develop", "poll_interval_seconds": 60,
         })
         issue = SimpleNamespace(
-            number=7, title="Ready fixture", body="Complete the fixture.",
+            number=7, title="Ready fixture", body=VALID_READY_ISSUE_BODY,
         )
         clients = {}
 
@@ -213,7 +285,9 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertIn("QUEUED", clients["spider-su/investory"].comments[0][1])
 
     def test_ready_issue_poll_retries_label_ack_without_duplicate_task(self) -> None:
-        issue = SimpleNamespace(number=8, title="Retry ack", body="Prompt")
+        issue = SimpleNamespace(
+            number=8, title="Retry ack", body=VALID_READY_ISSUE_BODY
+        )
         client = SimpleNamespace(
             list_ready_issues=lambda label: [issue],
             remove_issue_label=unittest.mock.Mock(side_effect=[RuntimeError("temporary"), None]),
@@ -227,6 +301,31 @@ class TaskSchedulerTests(unittest.TestCase):
             _poll_ready_issues(self.store, now=2060)
         self.assertEqual(len(self.store.list()), 1)
         self.assertEqual(client.remove_issue_label.call_count, 2)
+
+    def test_invalid_ready_issue_is_not_queued_and_keeps_label(self) -> None:
+        issue = SimpleNamespace(
+            number=9,
+            title="Incomplete issue",
+            body="Only a vague request.",
+            labels=[SimpleNamespace(name="ready_to_develop")],
+        )
+        client = SimpleNamespace(
+            list_ready_issues=lambda label: [issue],
+            remove_issue_label=unittest.mock.Mock(),
+            upsert_issue_comment=unittest.mock.Mock(),
+        )
+        with (
+            patch.dict(os.environ, {"READY_ISSUE_LABEL": "ready_to_develop"}),
+            patch("app.github_client.GitHubAppClient", return_value=client),
+        ):
+            queued = _poll_ready_issues(self.store, now=3000)
+
+        self.assertEqual(queued, 0)
+        self.assertEqual(self.store.list(), [])
+        client.remove_issue_label.assert_not_called()
+        comment = client.upsert_issue_comment.call_args.args[1]
+        self.assertIn("No workspace or Codex run was started.", comment)
+        self.assertIn("ready_to_develop", comment)
 
     def test_queue_obeys_build_limit(self) -> None:
         first = self.store.create(title="first")

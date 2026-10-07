@@ -156,7 +156,9 @@ AND
 valid issue contract
 ```
 
-The label is human authorization to execute. The scheduler removes it after
-the task is durably queued, posts a stable status comment, and the workflow
-still validates the issue contract before preparing a workspace. A passing
-workflow leaves a review-ready PR for the human to inspect and merge.
+The label is human authorization to execute. The scheduler validates the
+contract before creating a task or workspace. If validation fails, it posts a
+stable comment listing the missing information and leaves the label in place
+for correction and rechecking. A valid issue is durably queued, receives a
+stable status comment, and has its ready label removed. The planner and reviewer
+then use the issue's acceptance criteria to guide and assess implementation.

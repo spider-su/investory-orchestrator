@@ -137,6 +137,23 @@ class TaskStoreTests(unittest.TestCase):
                 metadata={"completion": {"source": "automation"}},
             )
 
+    def test_service_status_persists_and_worker_heartbeat_merges_metadata(self) -> None:
+        task = self.store.create(title="heartbeat", metadata={"preserved": True})
+
+        self.store.heartbeat_worker(task.task_id, "scheduler-1", 1234)
+        saved = self.store.get(task.task_id)
+        status = self.store.set_service_status(
+            "runner", "unavailable", "Mac SSH is unreachable.",
+            {"mode": "mac_ssh", "checks": {"ssh": False}},
+        )
+
+        self.assertTrue(saved.metadata["preserved"])
+        self.assertEqual(saved.metadata["lease_owner"], "scheduler-1")
+        self.assertEqual(saved.metadata["worker_pid"], 1234)
+        self.assertGreater(saved.metadata["worker_heartbeat_at"], 0)
+        self.assertEqual(self.store.get_service_status("runner"), status)
+        self.assertEqual(self.store.list_service_status(), [status])
+
     def test_checks_expected_status_atomically(self) -> None:
         task = self.store.create(title="Run task")
 

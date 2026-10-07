@@ -42,6 +42,14 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("location.pathname.replace(/\\/+$/,'')", response.text)
         self.assertIn("fetch(apiPrefix+path", response.text)
 
+    def test_runner_and_queue_status_requires_token_and_is_visible(self) -> None:
+        self.store.set_service_status("runner", "unavailable", "Mac is offline.")
+        self.assertEqual(self.client.get("/api/system").status_code, 401)
+        response = self.client.get("/api/system", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["name"], "runner")
+        self.assertEqual(response.json()[0]["status"], "unavailable")
+
     def test_repository_crud_task_events_and_stats(self) -> None:
         response = self.client.put(
             "/api/repositories",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -15,6 +16,7 @@ from app.task_scheduler import (
     reconcile_merged_task,
     run_queue,
 )
+from app.issue_validation import validate_issue_contract
 
 
 GraphFactory = Callable[[], Any]
@@ -157,6 +159,11 @@ def run_cli(
     )
     parser.add_argument("--list-tasks", action="store_true")
     parser.add_argument("--run-queue", action="store_true")
+    parser.add_argument(
+        "--resume-queue",
+        action="store_true",
+        help="Clear a Codex authentication/quota dispatch pause after repairing it.",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
         "--resume",
@@ -178,6 +185,7 @@ def run_cli(
             or args.reconcile_merged_pr
             or args.list_tasks
             or args.run_queue
+            or args.resume_queue
             or args.task_id
         )
         else None
@@ -189,7 +197,26 @@ def run_cli(
         repository_config = task_store.get_repository(repository)
         if repository_config and not repository_config["enabled"]:
             raise RuntimeError(f"Repository is disabled in configuration: {repository}")
-        issue = GitHubAppClient().get_issue(args.submit_issue)
+        client = GitHubAppClient()
+        issue = client.get_issue(args.submit_issue)
+        validation = validate_issue_contract(
+            issue.title or "",
+            issue.body or "",
+            tuple(getattr(label, "name", str(label)) for label in getattr(issue, "labels", ())),
+        )
+        if not validation.valid:
+            errors = "\n".join(f"- {item}" for item in validation.errors)
+            marker = "<!-- investory-orchestrator-intake-status -->"
+            client.upsert_issue_comment(
+                issue.number,
+                f"{marker}\nIssue not queued: it does not yet meet the ready-to-develop "
+                f"contract.\n\n{errors}\n\nNo workspace or Codex run was started.",
+                marker=marker,
+            )
+            raise RuntimeError(
+                f"Issue #{issue.number} does not meet the ready-to-develop contract: "
+                + "; ".join(validation.errors)
+            )
         task = task_store.create(
             issue_number=issue.number,
             title=issue.title,
@@ -246,6 +273,13 @@ def run_cli(
     if args.list_tasks:
         for task in task_store.list():
             _print_task(task)
+        return
+    if args.resume_queue:
+        task_store.set_service_status(
+            "codex_queue", "ready", "Queue pause cleared by operator.",
+            {"cleared_at": time.time()},
+        )
+        print("Codex queue pause cleared; dispatch will resume if the Mac runner is healthy.")
         return
     if args.run_queue:
         run_queue(task_store, once=args.once)
