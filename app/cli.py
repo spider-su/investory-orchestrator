@@ -137,6 +137,71 @@ def config_for_issue(issue_number: int) -> dict:
     }
 
 
+def _record_activity_changes(
+    store: TaskStore, task_id: str, previous: dict[str, Any], current: dict[str, Any]
+) -> None:
+    plan = current.get("plan") or {}
+    if plan and plan != previous.get("plan"):
+        summary = plan.get("summary") or "Implementation plan created."
+        store.add_activity(
+            task_id, actor="planner", event_type="plan_created",
+            message=summary,
+            metadata={"step_count": len(plan.get("steps", []))},
+        )
+
+    for field, actor, kind, label in (
+        ("coder_summary", "coder", "implementation_update", "Implementation update"),
+        ("coder_error", "coder", "agent_error", "Coder reported an error"),
+    ):
+        value = current.get(field, "")
+        if value and value != previous.get(field, ""):
+            store.add_activity(task_id, actor=actor, event_type=kind,
+                               message=value if field == "coder_summary" else f"{label}: {value}")
+
+    for prefix, label in (("validation", "Step validation"), ("final_validation", "Final validation")):
+        status_key = f"{prefix}_status"
+        value = current.get(status_key, "")
+        if value and value != previous.get(status_key, "") and value != "not_started":
+            message = f"{label}: {value.replace('_', ' ')}."
+            store.add_activity(task_id, actor="validator", event_type="validation_result",
+                               message=message, metadata={"status": value})
+
+    for prefix, actor in (("review", "reviewer"), ("final_review", "reviewer")):
+        status_key = f"{prefix}_status"
+        value = current.get(status_key, "")
+        if value and value != previous.get(status_key, "") and value not in {"not_started", ""}:
+            review = current.get(prefix, {}) or {}
+            summary = review.get("summary", "") if isinstance(review, dict) else ""
+            findings = review.get("findings", []) if isinstance(review, dict) else []
+            message = f"Review result: {value.replace('_', ' ')}."
+            if summary:
+                message += f" {summary}"
+            if findings:
+                finding_titles = [
+                    f"{item.get('title', 'Finding')} ({item.get('severity', 'unspecified')})"
+                    for item in findings[:8]
+                    if isinstance(item, dict)
+                ]
+                if finding_titles:
+                    message += " Findings: " + "; ".join(finding_titles)
+            store.add_activity(task_id, actor=actor, event_type="review_result", message=message,
+                               metadata={"status": value, "finding_count": len(findings)})
+
+    pr_url = current.get("pull_request_url", "")
+    if pr_url and pr_url != previous.get("pull_request_url", ""):
+        pr_number = current.get("pull_request_number", "")
+        store.add_activity(
+            task_id, actor="orchestrator", event_type="draft_pr_ready",
+            message=f"Draft pull request #{pr_number} sent for review: {pr_url}",
+            metadata={"pull_request_number": pr_number, "pull_request_url": pr_url},
+        )
+
+    reason = current.get("blocked_reason", "")
+    if reason and reason != previous.get("blocked_reason", ""):
+        store.add_activity(task_id, actor="orchestrator", event_type="blocked",
+                           message=reason, metadata={"stage": current.get("blocked_stage", "")})
+
+
 def run_cli(
     *,
     build_graph: GraphFactory,
@@ -313,7 +378,14 @@ def run_cli(
             )
         else:
             stream = graph.stream(None, config=config, stream_mode="values")
+        previous_state = (
+            dict(graph.get_state(config).values)
+            if initial_state is None
+            else {}
+        )
         for state in stream:
+            _record_activity_changes(task_store, args.task_id, previous_state, state)
+            previous_state = dict(state)
             status = _task_status_for_workflow(state.get("workflow_status", ""))
             if status is not None:
                 _track_task_state(

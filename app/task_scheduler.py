@@ -882,6 +882,11 @@ def _poll_ci(store: TaskStore) -> None:
             print(f"CI status unavailable for task {task.task_id}: {error}")
             continue
         if state == "success":
+            store.add_activity(
+                task.task_id, actor="orchestrator", event_type="ci_result",
+                message=f"GitHub Actions passed for draft PR #{task.pr_number}.",
+                metadata={"status": "success"},
+            )
             updated = store.transition(
                 task.task_id,
                 TaskStatus.FINAL_REVIEW,
@@ -890,6 +895,11 @@ def _poll_ci(store: TaskStore) -> None:
             )
             _run_final_review(store, updated)
         elif state == "failure":
+            store.add_activity(
+                task.task_id, actor="orchestrator", event_type="ci_result",
+                message=f"GitHub Actions failed for draft PR #{task.pr_number}; task is blocked for repair.",
+                metadata={"status": "failure"},
+            )
             store.transition(
                 task.task_id,
                 TaskStatus.BLOCKED,

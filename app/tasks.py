@@ -248,6 +248,29 @@ class TaskStore:
                 "CREATE INDEX IF NOT EXISTS task_events_task_created "
                 "ON task_events(task_id, created_at)"
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS task_activity (
+                    activity_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at DOUBLE PRECISION NOT NULL
+                )""" if self.is_postgres else """CREATE TABLE IF NOT EXISTS task_activity (
+                    activity_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS task_activity_task_created "
+                "ON task_activity(task_id, created_at, activity_id)"
+            )
             if self.is_postgres:
                 repository_config_table_exists = connection.execute(
                     "SELECT to_regclass('repository_configs') IS NOT NULL AS present"
@@ -380,6 +403,19 @@ class TaskStore:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (uuid.uuid4().hex, task_id, None, TaskStatus.QUEUED.value, "created", now),
             )
+            initial_metadata: Any = json.dumps({})
+            if self.is_postgres:
+                from psycopg.types.json import Jsonb
+
+                initial_metadata = Jsonb({})
+            self._execute(
+                connection,
+                "INSERT INTO task_activity "
+                "(activity_id, task_id, actor, event_type, message, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, task_id, "orchestrator", "task_queued",
+                 "Task queued for processing.", initial_metadata, now),
+            )
             row = self._execute(
                 connection, "SELECT * FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
@@ -456,6 +492,49 @@ class TaskStore:
                 (task_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def add_activity(
+        self,
+        task_id: str,
+        *,
+        actor: str,
+        event_type: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.get(task_id) is None:
+            raise KeyError(f"Unknown task: {task_id}")
+        now = time.time()
+        activity_metadata: Any = json.dumps(metadata or {})
+        if self.is_postgres:
+            from psycopg.types.json import Jsonb
+
+            activity_metadata = Jsonb(metadata or {})
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                "INSERT INTO task_activity "
+                "(activity_id, task_id, actor, event_type, message, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, task_id, actor, event_type, message,
+                 activity_metadata, now),
+            )
+
+    def list_activity(self, task_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                "SELECT activity_id, task_id, actor, event_type, message, metadata, created_at "
+                "FROM task_activity WHERE task_id=? ORDER BY created_at, activity_id",
+                (task_id,),
+            ).fetchall()
+        activity = []
+        for row in rows:
+            entry = dict(row)
+            if isinstance(entry["metadata"], str):
+                entry["metadata"] = json.loads(entry["metadata"] or "{}")
+            activity.append(entry)
+        return activity
 
     def heartbeat_worker(self, task_id: str, owner: str, pid: int) -> None:
         now = time.time()
@@ -797,6 +876,25 @@ class TaskStore:
                     now,
                 ),
             )
+            if status != current:
+                activity_data = {
+                    "from_status": current.value,
+                    "to_status": status.value,
+                }
+                activity_metadata: Any = json.dumps(activity_data)
+                if self.is_postgres:
+                    from psycopg.types.json import Jsonb
+
+                    activity_metadata = Jsonb(activity_data)
+                self._execute(
+                    connection,
+                    "INSERT INTO task_activity "
+                    "(activity_id, task_id, actor, event_type, message, metadata, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (uuid.uuid4().hex, task_id, "orchestrator", "workflow_status",
+                     f"Task status changed to {status.value.replace('_', ' ').lower()}.",
+                     activity_metadata, now),
+                )
             row = self._execute(
                 connection,
                 "SELECT * FROM tasks WHERE task_id=?", (task_id,)
