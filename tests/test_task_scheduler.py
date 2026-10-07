@@ -25,6 +25,10 @@ from app.tasks import TaskStatus, TaskStore
 class TaskSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.repository_env = patch.dict(
+            os.environ, {"GITHUB_REPOSITORY": "spider-su/investory"}, clear=False
+        )
+        self.repository_env.start()
         self.store = TaskStore(Path(self.temp_dir.name) / "tasks.db")
         from app.task_scheduler import _last_repository_poll
 
@@ -32,6 +36,7 @@ class TaskSchedulerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+        self.repository_env.stop()
 
     def test_resuming_status_clears_stale_blocked_details(self) -> None:
         task = self.store.create(title="resume", issue_number=104)
