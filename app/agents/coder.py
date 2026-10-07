@@ -92,6 +92,7 @@ def run_coder(
     issue_title: str,
     issue_body: str,
     step: dict,
+    completed_step_results: list[dict] | None = None,
     validation_output: str,
     review_feedback: dict,
     attempt: int,
@@ -115,6 +116,10 @@ Description:
 
 Current implementation step:
 {step}
+
+Results from completed implementation steps (these are part of the approved
+workflow context; use them instead of asking the user to repeat findings):
+{json.dumps(completed_step_results or [], indent=2, sort_keys=True)}
 
 Orchestrator-captured initial workspace audit (captured before planning or
 agent edits; authoritative for initial branch, commit, and tracked/untracked
@@ -144,6 +149,17 @@ Instructions:
   issue or plan.
 - If the current step is inspection or inventory only, make no workspace
   changes and report concrete evidence in `evidence`.
+- Treat accepted results from completed steps as available evidence and build
+  on them. Do not ask the user to provide findings, files, or evidence already
+  present in the issue, approved plan, completed-step results, or repository.
+- A step may be completed without code changes when its requirements are
+  already satisfied or prior evidence shows there is no safe, in-scope change
+  to make. Record that conclusion and preserve uncertain items instead of
+  requesting input or inventing work.
+- Before requesting human input, inspect the available issue, plan, completed
+  step results, repository, tests, and relevant documentation. Ask only when a
+  material product decision is genuinely missing and no safe in-scope action
+  or no-op can satisfy the step.
 - Inspect AGENTS.md and repository documentation before editing.
 - Implement only this issue.
 - Make the smallest correct change.
