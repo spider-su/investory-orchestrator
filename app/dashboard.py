@@ -51,6 +51,12 @@ def create_app(store: TaskStore | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Task not found")
         return task_store.list_events(task_id)
 
+    @app.get("/api/tasks/{task_id:path}/activity", dependencies=[Depends(authorize)])
+    async def task_activity(task_id: str) -> list[dict[str, Any]]:
+        if task_store.get(task_id) is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task_store.list_activity(task_id)
+
     @app.get("/api/stats", dependencies=[Depends(authorize)])
     async def statistics() -> dict[str, Any]:
         return task_store.statistics()
@@ -85,10 +91,11 @@ header{display:flex;justify-content:space-between;align-items:center}h1{font-siz
 .stats{display:flex;gap:.7rem;flex-wrap:wrap}.stat{min-width:120px}.muted{color:#57606a}
 table{width:100%;border-collapse:collapse;background:white}th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:.65rem}
 input,button{font:inherit;padding:.45rem;border:1px solid #afb8c1;border-radius:5px}button{cursor:pointer;background:#0969da;color:white}
-form{display:flex;gap:.5rem;flex-wrap:wrap}code{font-size:.9em}#error{color:#cf222e}
+form{display:flex;gap:.5rem;flex-wrap:wrap}code{font-size:.9em}#error{color:#cf222e}.activity-item{border-left:3px solid #0969da;padding:.45rem .8rem;margin:.6rem 0;background:#f6f8fa}.activity-item small{color:#57606a}.activity-item p{margin:.25rem 0}
 </style></head><body><header><h1>Investory Orchestrator</h1><label>API token <input id="token" type="password" placeholder="dashboard token"></label></header>
 <p id="error"></p><section class="card"><h2>Runner and queue</h2><div id="system" class="muted">Status unavailable</div></section><section class="card"><h2>Task statistics</h2><div id="stats" class="stats"></div></section>
 <section class="card"><h2>Tasks</h2><table><thead><tr><th>Task</th><th>Repository</th><th>Status</th><th>Priority</th><th>PR</th><th>Updated</th></tr></thead><tbody id="tasks"></tbody></table></section>
+<section class="card"><h2 id="activity-title">Task activity</h2><div id="activity" class="muted">Select a task to see its activity.</div></section>
 <section class="card"><h2>Repository configuration</h2><form id="repo"><input name="repository" value="spider-su/investory" required placeholder="owner/repo"><input name="base_branch" value="develop" required placeholder="base branch"><input name="notification_login" value="spider-su" placeholder="GitHub login to mention"><input name="github_project_number" type="number" min="1" placeholder="Project number"><input name="priority_field_name" value="Priority" required placeholder="Priority field"><input name="poll_interval_seconds" type="number" min="30" max="86400" value="60" required title="Issue polling interval in seconds"><label><input name="enabled" type="checkbox" checked> Enabled</label><button>Save repository</button></form><p class="muted">Repository settings are stored in PostgreSQL. Project number is optional until Projects access is configured.</p><ul id="repositories"></ul></section>
 <script>
 const tokenInput=document.querySelector('#token');tokenInput.value=sessionStorage.getItem('api-token')||'';tokenInput.onchange=()=>{sessionStorage.setItem('api-token',tokenInput.value);refresh()};
@@ -96,6 +103,8 @@ const apiPrefix=location.pathname.replace(/\\/+$/,'');
 async function api(path,options={}){const response=await fetch(apiPrefix+path,{...options,headers:{'Content-Type':'application/json','Authorization':'Bearer '+tokenInput.value,...options.headers}});if(!response.ok)throw Error((await response.text())||response.statusText);return response.json()}
 function date(value){return new Date(value*1000).toLocaleString()}
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let selectedTask='';
+async function showActivity(taskId,title){selectedTask=taskId;document.querySelector('#activity-title').textContent='Activity: '+title;const items=await api('/api/tasks/'+encodeURIComponent(taskId)+'/activity');if(selectedTask!==taskId)return;document.querySelector('#activity').innerHTML=items.map(item=>`<article class="activity-item"><b>${esc(item.actor)} · ${esc(item.event_type.replaceAll('_',' '))}</b><p>${esc(item.message)}</p><small>${esc(date(item.created_at))}</small></article>`).join('')||'No activity recorded.'}
 async function refresh(){
   try{
     document.querySelector('#error').textContent='';
@@ -108,8 +117,10 @@ async function refresh(){
       const release=t.metadata?.release_promotion;
       const taskPr=String(t.pr_url||'').startsWith('https://github.com/')?`<a href="${esc(t.pr_url)}" rel="noopener">Task #${t.pr_number}</a>`:'—';
       const releasePr=String(release?.pull_request_url||'').startsWith('https://github.com/')?`<br><a href="${esc(release.pull_request_url)}" rel="noopener">Release #${esc(release.pull_request_number)} (${esc(release.status)})</a>`:'';
-      return `<tr><td>${esc(t.title)}<br><small class="muted">${esc(t.task_id)}</small></td><td>${esc(t.repository)}</td><td>${esc(t.status)}</td><td>${t.priority}</td><td>${taskPr}${releasePr}</td><td>${esc(date(t.updated_at))}</td></tr>`
+      return `<tr><td><button data-task="${esc(t.task_id)}" data-title="${esc(t.title)}">${esc(t.title)}</button><br><small class="muted">${esc(t.task_id)}</small></td><td>${esc(t.repository)}</td><td>${esc(t.status)}</td><td>${t.priority}</td><td>${taskPr}${releasePr}</td><td>${esc(date(t.updated_at))}</td></tr>`
     }).join('');
+    document.querySelectorAll('[data-task]').forEach(b=>b.onclick=()=>showActivity(b.dataset.task,b.dataset.title).catch(e=>{document.querySelector('#error').textContent=e.message}));
+    if(selectedTask)showActivity(selectedTask,document.querySelector('#activity-title').textContent.replace(/^Activity: /,'')).catch(e=>{document.querySelector('#error').textContent=e.message});
     document.querySelector('#repositories').innerHTML=repos.map(r=>`<li>${r.enabled?'●':'○'} <b>${esc(r.repository)}</b> → ${esc(r.base_branch)} · notify @${esc(r.notification_login||'not set')} <button data-delete="${esc(r.repository)}">Delete</button></li>`).join('');
     document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{await api('/api/repositories/'+encodeURIComponent(b.dataset.delete),{method:'DELETE'});refresh()})
   }catch(e){document.querySelector('#error').textContent=e.message}

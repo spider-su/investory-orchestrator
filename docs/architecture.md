@@ -34,6 +34,12 @@ checks, and a fresh final PR review with a known identity distinct from the
 coder. The scheduler never treats an agent response as authority to complete a
 task.
 
+Task activity is persisted separately from state transitions. The dashboard
+shows orchestrator status changes, planner summaries, coder updates, validation
+results, reviewer findings, draft-PR creation, and CI outcomes in timestamp
+order. This feed records workflow activity; it does not accept messages or
+alter task execution.
+
 Task states are `QUEUED`, `PLANNING`, `IMPLEMENTING`, `VALIDATING`,
 `REVIEWING`, `PUBLISHING`, `WAITING_CI`, `FINAL_REVIEW`, `READY`, `COMPLETED`,
 `BLOCKED`, and `FAILED`. SQLite persists local task records separately from LangGraph
