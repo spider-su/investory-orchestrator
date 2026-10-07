@@ -38,6 +38,56 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved.status, TaskStatus.PLANNING)
         self.assertEqual(saved.workspace, "/tmp/task-42")
 
+    def test_issue_numbers_are_unique_per_repository(self) -> None:
+        first = self.store.create(
+            issue_number=42, title="First", repository="one/repo",
+        )
+        second = self.store.create(
+            issue_number=42, title="Second", repository="two/repo",
+        )
+        duplicate = self.store.create(
+            issue_number=42, title="Duplicate", repository="one/repo",
+        )
+
+        self.assertNotEqual(first.task_id, second.task_id)
+        self.assertEqual(duplicate.task_id, first.task_id)
+        self.assertEqual(self.store.get("one/repo#42").title, "First")
+        self.assertEqual(self.store.get("two/repo#42").title, "Second")
+
+    def test_migrates_legacy_global_issue_number_constraint(self) -> None:
+        import sqlite3
+        import time
+
+        path = Path(self.temp_dir.name) / "legacy.db"
+        connection = sqlite3.connect(path)
+        connection.execute(
+            """CREATE TABLE tasks (
+            task_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+            issue_number INTEGER UNIQUE, title TEXT NOT NULL, body TEXT NOT NULL,
+            status TEXT NOT NULL, workspace TEXT NOT NULL DEFAULT '',
+            branch TEXT NOT NULL DEFAULT '', pr_number INTEGER,
+            pr_url TEXT NOT NULL DEFAULT '', ci_status TEXT NOT NULL DEFAULT 'not_started',
+            implementation_attempts INTEGER NOT NULL DEFAULT 0,
+            validation_attempts INTEGER NOT NULL DEFAULT 0,
+            ci_attempts INTEGER NOT NULL DEFAULT 0,
+            blocked_reason TEXT NOT NULL DEFAULT '', metadata TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL, updated_at REAL NOT NULL)"""
+        )
+        connection.execute(
+            "INSERT INTO tasks(task_id, source, issue_number, title, body, status, created_at, updated_at) "
+            "VALUES ('42', 'github_issue', 42, 'Legacy', '', 'QUEUED', ?, ?)",
+            (time.time(), time.time()),
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = TaskStore(path)
+        self.assertEqual(migrated.get("spider-su/investory#42").title, "Legacy")
+        other = migrated.create(
+            issue_number=42, title="Other repo", repository="other/repo",
+        )
+        self.assertEqual(other.repository, "other/repo")
+
     def test_rejects_invalid_transition(self) -> None:
         task = self.store.create(title="Run task")
 

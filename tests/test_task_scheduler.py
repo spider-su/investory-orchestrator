@@ -11,6 +11,7 @@ from app.task_scheduler import (
     _print_task,
     _poll_ci,
     _notify_terminal_tasks,
+    _poll_ready_issues,
     _remote_worker_command,
     _remote_worker_is_running,
     _sync_task_result,
@@ -25,6 +26,9 @@ class TaskSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = TaskStore(Path(self.temp_dir.name) / "tasks.db")
+        from app.task_scheduler import _last_repository_poll
+
+        _last_repository_poll.clear()
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -151,10 +155,73 @@ class TaskSchedulerTests(unittest.TestCase):
         with patch("app.github_client.GitHubAppClient") as client_type:
             _notify_terminal_tasks(self.store)
             _notify_terminal_tasks(self.store)
-        client_type.return_value.upsert_issue_comment.assert_called_once()
+        self.assertEqual(client_type.return_value.upsert_issue_comment.call_count, 2)
         body = client_type.return_value.upsert_issue_comment.call_args.args[1]
         self.assertIn("@spider-su", body)
         self.assertIn("Needs a human decision", body)
+
+    def test_ready_issue_polling_is_repo_scoped_idempotent_and_interval_limited(self) -> None:
+        self.store.save_repository({
+            "repository": "other/project", "enabled": True,
+            "base_branch": "develop", "poll_interval_seconds": 60,
+        })
+        issue = SimpleNamespace(
+            number=7, title="Ready fixture", body="Complete the fixture.",
+        )
+        clients = {}
+
+        class FakeClient:
+            def __init__(self, repository):
+                self.repository = repository
+                self.removed = []
+                self.comments = []
+                self.list_calls = 0
+                clients[repository] = self
+
+            def list_ready_issues(self, label):
+                self.list_calls += 1
+                self.asserted_label = label
+                return [issue]
+
+            def remove_issue_label(self, issue_number, label):
+                self.removed.append((issue_number, label))
+
+            def upsert_issue_comment(self, issue_number, body, *, marker):
+                self.comments.append((issue_number, body, marker))
+
+        with (
+            patch.dict(os.environ, {"READY_ISSUE_LABEL": "ready_to_develop"}),
+            patch("app.github_client.GitHubAppClient", FakeClient),
+        ):
+            self.assertEqual(_poll_ready_issues(self.store, now=1000), 2)
+            self.assertEqual(_poll_ready_issues(self.store, now=1010), 0)
+
+        first = self.store.get("spider-su/investory#7")
+        second = self.store.get("other/project#7")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first.task_id, second.task_id)
+        self.assertEqual(first.metadata["base_branch"], "develop")
+        self.assertEqual(clients["spider-su/investory"].list_calls, 1)
+        self.assertEqual(clients["other/project"].list_calls, 1)
+        self.assertEqual(clients["spider-su/investory"].removed, [(7, "ready_to_develop")])
+        self.assertIn("QUEUED", clients["spider-su/investory"].comments[0][1])
+
+    def test_ready_issue_poll_retries_label_ack_without_duplicate_task(self) -> None:
+        issue = SimpleNamespace(number=8, title="Retry ack", body="Prompt")
+        client = SimpleNamespace(
+            list_ready_issues=lambda label: [issue],
+            remove_issue_label=unittest.mock.Mock(side_effect=[RuntimeError("temporary"), None]),
+            upsert_issue_comment=unittest.mock.Mock(),
+        )
+        with (
+            patch.dict(os.environ, {"READY_ISSUE_LABEL": "ready_to_develop"}),
+            patch("app.github_client.GitHubAppClient", return_value=client),
+        ):
+            _poll_ready_issues(self.store, now=2000)
+            _poll_ready_issues(self.store, now=2060)
+        self.assertEqual(len(self.store.list()), 1)
+        self.assertEqual(client.remove_issue_label.call_count, 2)
 
     def test_queue_obeys_build_limit(self) -> None:
         first = self.store.create(title="first")
@@ -163,6 +230,7 @@ class TaskSchedulerTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"MAX_ACTIVE_TASKS": "3", "MAX_CODEX_PROCESSES": "3", "MAX_BUILDS": "1"}),
             patch("app.task_scheduler.subprocess.Popen", return_value=process) as popen,
+            patch("app.task_scheduler._poll_ready_issues"),
             patch("app.task_scheduler._poll_ci"),
         ):
             run_queue(self.store, once=True)
@@ -184,6 +252,7 @@ class TaskSchedulerTests(unittest.TestCase):
         with (
             patch("app.task_scheduler._pid_alive", return_value=False),
             patch("app.task_scheduler.subprocess.Popen", return_value=process) as popen,
+            patch("app.task_scheduler._poll_ready_issues"),
             patch("app.task_scheduler._poll_ci"),
         ):
             run_queue(self.store, once=True)
@@ -287,6 +356,7 @@ class TaskSchedulerTests(unittest.TestCase):
         process = SimpleNamespace(pid=987656, wait=lambda: 0)
         with (
             patch("app.task_scheduler.subprocess.Popen", return_value=process) as popen,
+            patch("app.task_scheduler._poll_ready_issues"),
             patch("app.task_scheduler._poll_ci"),
         ):
             run_queue(self.store, once=True)
@@ -310,6 +380,7 @@ class TaskSchedulerTests(unittest.TestCase):
         process = SimpleNamespace(pid=987657, wait=lambda: 0)
         with (
             patch("app.task_scheduler.subprocess.Popen", return_value=process) as popen,
+            patch("app.task_scheduler._poll_ready_issues"),
             patch("app.task_scheduler._poll_ci"),
         ):
             run_queue(self.store, once=True)
@@ -339,6 +410,7 @@ class TaskSchedulerTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"CI_RETRY_ATTEMPTS": "3"}),
             patch("app.task_scheduler.subprocess.Popen") as popen,
+            patch("app.task_scheduler._poll_ready_issues"),
             patch("app.task_scheduler._poll_ci"),
         ):
             run_queue(self.store, once=True)

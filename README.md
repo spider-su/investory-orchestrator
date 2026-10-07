@@ -103,7 +103,11 @@ READY when those identities match or are missing.
 
 ## Current limitations
 
-- Queue intake is explicit; polling an `agent-ready` GitHub label is deferred.
+- The scheduler polls each enabled repository at its configured interval for
+  open issues labeled `ready_to_develop`. The issue body is the task prompt;
+  after the task is durably queued, the label is removed and a stable status
+  comment is posted. The dashboard tracks progress, and a GitHub mention is
+  posted when the PR is ready for human review.
 - Live GitHub, Dev Container, coder, and GitHub Actions end-to-end scenarios
   have not yet been run for the new queue lifecycle.
 - Interrupted coder work with an uncommitted diff is preserved and blocked for
@@ -118,7 +122,7 @@ READY when those identities match or are missing.
 
 - [`docs/architecture.md`](docs/architecture.md) — workflow graph, state,
   retries, checkpoints, finalization, and module responsibilities
-- [`docs/issue-contract.md`](docs/issue-contract.md) — manual agent-ready issue
+- [`docs/issue-contract.md`](docs/issue-contract.md) — ready-to-develop issue
   standard and future automatic preflight
 - [`docs/operations.md`](docs/operations.md) — configuration, credentials,
   commands, validation, inspection, and recovery

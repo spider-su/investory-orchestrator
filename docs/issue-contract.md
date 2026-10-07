@@ -1,16 +1,15 @@
-# Agent-ready issue contract
+# Ready-to-develop issue contract
 
-The current CLI does not validate issue readiness automatically. Before
-starting a run, the operator must review the issue against this contract.
-Automatic rejection before workspace creation and planning is planned
-operational hardening.
+Issues carrying the `ready_to_develop` label are queued automatically. The
+workflow validates the issue contract before workspace creation and planning;
+the label authorizes execution but does not bypass validation.
 
 ## Ownership
 
 The issue author owns product intent. Agents own implementation choices inside
 the declared scope and constraints.
 
-An issue is agent-ready only when all material product, business,
+An issue is ready to develop only when all material product, business,
 compatibility, and UX decisions have already been made. The planner must not be
 required to act as a product manager.
 
@@ -149,13 +148,15 @@ load issue
     → planner
 ```
 
-A future unattended queue must require both:
+A queued task requires both:
 
 ```text
-agent-ready label
+`ready_to_develop` label
 AND
 valid issue contract
 ```
 
-The label is human authorization to execute. It must not bypass contract
-validation.
+The label is human authorization to execute. The scheduler removes it after
+the task is durably queued, posts a stable status comment, and the workflow
+still validates the issue contract before preparing a workspace. A passing
+workflow leaves a review-ready PR for the human to inspect and merge.

@@ -149,7 +149,7 @@ class TaskStore:
                     """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
                     source TEXT NOT NULL,
-                    issue_number INTEGER UNIQUE,
+                    issue_number INTEGER,
                     title TEXT NOT NULL,
                     body TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -166,7 +166,8 @@ class TaskStore:
                     repository TEXT NOT NULL DEFAULT 'spider-su/investory',
                     priority INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    UNIQUE(repository, issue_number)
                 )"""
                 )
                 columns = {
@@ -181,6 +182,47 @@ class TaskStore:
                     connection.execute(
                         "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
                     )
+                # Older SQLite databases constrained issue_number globally.
+                # Rebuild once so separate repositories can contain the same
+                # issue number while preserving task/event IDs and data.
+                indexes = connection.execute("PRAGMA index_list(tasks)").fetchall()
+                globally_unique = any(
+                    row["unique"]
+                    and [column["name"] for column in connection.execute(
+                        f"PRAGMA index_info('{row['name']}')"
+                    ).fetchall()] == ["issue_number"]
+                    for row in indexes
+                )
+                if globally_unique:
+                    connection.execute("ALTER TABLE tasks RENAME TO tasks_legacy")
+                    connection.execute(
+                        """CREATE TABLE tasks (
+                        task_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                        issue_number INTEGER, title TEXT NOT NULL, body TEXT NOT NULL,
+                        status TEXT NOT NULL, workspace TEXT NOT NULL DEFAULT '',
+                        branch TEXT NOT NULL DEFAULT '', pr_number INTEGER,
+                        pr_url TEXT NOT NULL DEFAULT '',
+                        ci_status TEXT NOT NULL DEFAULT 'not_started',
+                        implementation_attempts INTEGER NOT NULL DEFAULT 0,
+                        validation_attempts INTEGER NOT NULL DEFAULT 0,
+                        ci_attempts INTEGER NOT NULL DEFAULT 0,
+                        blocked_reason TEXT NOT NULL DEFAULT '', metadata TEXT NOT NULL DEFAULT '{}',
+                        repository TEXT NOT NULL DEFAULT 'spider-su/investory',
+                        priority INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL, UNIQUE(repository, issue_number))"""
+                    )
+                    legacy_columns = [
+                        row["name"]
+                        for row in connection.execute(
+                            "PRAGMA table_info(tasks_legacy)"
+                        ).fetchall()
+                    ]
+                    column_list = ", ".join(legacy_columns)
+                    connection.execute(
+                        f"INSERT INTO tasks ({column_list}) "
+                        f"SELECT {column_list} FROM tasks_legacy"
+                    )
+                    connection.execute("DROP TABLE tasks_legacy")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS tasks_status_created "
                 "ON tasks(status, priority, created_at)"
@@ -286,20 +328,19 @@ class TaskStore:
             "GITHUB_REPOSITORY", "spider-su/investory"
         )
         if issue_number is not None:
-            existing = self.get(
-                f"{repository}#{issue_number}"
-                if self.is_postgres
-                else str(issue_number)
-            )
+            existing = self.get(f"{repository}#{issue_number}")
             if existing is not None:
                 return existing
         now = time.time()
         if issue_number is None:
             task_id = uuid.uuid4().hex[:12]
-        elif self.is_postgres:
-            task_id = f"{repository}#{issue_number}"
-        else:
+        elif not self.is_postgres and repository == os.getenv(
+            "GITHUB_REPOSITORY", "spider-su/investory"
+        ):
+            # Preserve legacy dashboard URLs for the primary SQLite repository.
             task_id = str(issue_number)
+        else:
+            task_id = f"{repository}#{issue_number}"
         metadata_value: Any = json.dumps(metadata or {})
         if self.is_postgres:
             from psycopg.types.json import Jsonb
@@ -354,10 +395,22 @@ class TaskStore:
                     (task_id_value, issue_number, repository),
                 ).fetchone()
             else:
-                row = connection.execute(
-                    "SELECT * FROM tasks WHERE task_id=? OR issue_number=?",
-                    (task_id, task_id if task_id.isdigit() else None),
-                ).fetchone()
+                if "#" in task_id:
+                    repository, issue_part = task_id.rsplit("#", 1)
+                    issue_number = int(issue_part)
+                    row = connection.execute(
+                        "SELECT * FROM tasks WHERE task_id=? OR "
+                        "(issue_number=? AND repository=?)",
+                        (task_id, issue_number, repository),
+                    ).fetchone()
+                else:
+                    issue_number = int(task_id) if task_id.isdigit() else None
+                    repository = os.getenv("GITHUB_REPOSITORY", "spider-su/investory")
+                    row = connection.execute(
+                        "SELECT * FROM tasks WHERE task_id=? OR "
+                        "(issue_number=? AND repository=?)",
+                        (task_id, issue_number, repository),
+                    ).fetchone()
         return self._task(row) if row else None
 
     def list(self, statuses: set[TaskStatus] | None = None) -> list[Task]:

@@ -162,10 +162,7 @@ history, repository configuration CRUD, task/status dashboard APIs, a single
 Mac SSH dispatch path with restart-aware task locks, terminal issue mentions,
 and k3s manifests.
 
-Still required before calling the POC verified: provision runtime secrets,
-build/publish an immutable image, confirm SSH key authentication, apply the
-manifest, verify the Mac uses the same PostgreSQL schema, configure an actual
-GitHub Project and its priority field (the current GitHub CLI token lacks
-`read:project`), and run one issue through remote final review, human merge,
-post-merge CI, and issue completion. Do not enable unattended issue polling
-until those checks pass.
+The remaining live acceptance is to label an issue `ready_to_develop` and
+watch it through remote execution, CI, final review, the human merge, and
+post-merge completion. GitHub Projects/priority synchronization remains
+optional and is not part of label-based intake.

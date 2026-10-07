@@ -46,7 +46,7 @@ completion gate.
 | **Hardening:** CI polling and bounded repair | Yes | No | No |
 | **Hardening:** Post-CI independent final review | Yes | No | No |
 | **Hardening:** Pluggable agent backends | No | No | No |
-| **Hardening:** `agent-ready` label polling | No | No | No |
+| **Hardening:** `ready_to_develop` label polling and acknowledgement | Yes | No | No |
 | **POC:** PostgreSQL-backed tasks and LangGraph checkpoints | Yes | No | No |
 | **POC:** Repository configuration CRUD and task dashboard | Yes | No | No |
 | **POC:** k3s scheduler to devMac SSH worker dispatch | Yes | No | No |
@@ -135,20 +135,14 @@ state for safe resume.
   frameworks, modules, package roots, entry points, documentation, and
   validation commands.
 
-## Priority 5 — Add automatic issue queue intake
+## Priority 5 — Verify automatic issue queue intake
 
-Extend explicit task submission with label polling that:
-
-- selects only issues labeled `agent-ready`
-- also requires a valid automatic issue contract
-- skips issues already running or represented by an open agent PR
-- applies `agent-running`, `agent-blocked`, or `agent-completed`
-- uses the configured task, Codex, and build limits
-- limits issues, failures, and execution time per run
-- preserves blocked workspaces
-
-Unattended queue execution remains blocked until automatic issue validation,
-routing tests, independent CI, and recovery behavior are verified.
+The scheduler now polls enabled repositories for `ready_to_develop`, queues
+each repository/issue pair idempotently, removes the authorization label after
+acknowledgement, and posts a stable status comment. Existing concurrency limits,
+CI polling, bounded repairs, independent final review, and manual merge gates
+remain in force. Next verify a real labeled issue through the deployed Mac
+runner and confirm the ready-for-review mention and post-merge completion.
 
 ## Later work
 
@@ -171,8 +165,8 @@ routing tests, independent CI, and recovery behavior are verified.
 7. Verify retry isolation, whole-plan repair, and history rewriting.
 8. Introduce pluggable agent backends and prompt builders.
 9. Add structured repository metadata and operational telemetry.
-10. Add automatic `agent-ready` label polling.
-11. Add polling, webhooks, and optional parallelism.
+10. Verify automatic `ready_to_develop` intake against the deployed runner.
+11. Add webhook intake and optional parallelism if polling is insufficient.
 
 ## POC — k3s scheduler and devMac execution
 
