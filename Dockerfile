@@ -1,3 +1,28 @@
+FROM python:3.13-slim AS python-deps
+
+WORKDIR /app
+
+# The k3s scheduler only needs Python, CA certificates, and SSH to reach devMac.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN python -m pip install --no-cache-dir --upgrade 'pip' \
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && rm -rf \
+        /usr/local/lib/python3.13/site-packages/pip \
+        /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.13
+
+# This target is used by both k3s Deployments. Codex and build tools stay on devMac.
+FROM python-deps AS k3s
+COPY . .
+ENTRYPOINT ["python"]
+CMD ["-m", "app", "--help"]
+
 FROM golang:1.26.8-bookworm AS buildx-builder
 
 ARG BUILDX_VERSION=v0.37.2
@@ -13,16 +38,13 @@ RUN go mod edit -replace=github.com/moby/go-archive=github.com/moby/go-archive@v
             -ldflags "-s -w -X github.com/docker/buildx/version.Version=${BUILDX_VERSION}" \
             -o /out/docker-buildx ./cmd/buildx
 
-FROM python:3.13-slim
-
-WORKDIR /app
+# Keep the default target as the full local/worker image used by docker compose.
+FROM python-deps AS full
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates \
         curl \
         git \
-        openssh-client \
         nodejs \
         npm \
     && install -m 0755 -d /etc/apt/keyrings \
@@ -54,16 +76,6 @@ RUN apt-get update \
 COPY --from=buildx-builder /out/docker-buildx /usr/libexec/docker/cli-plugins/docker-buildx
 RUN chmod 0755 /usr/libexec/docker/cli-plugins/docker-buildx \
     && docker buildx version
-
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --upgrade 'pip' \
-    && python -m pip install --no-cache-dir -r requirements.txt \
-    && rm -rf \
-        /usr/local/lib/python3.13/site-packages/pip \
-        /usr/local/lib/python3.13/site-packages/pip-*.dist-info \
-        /usr/local/bin/pip \
-        /usr/local/bin/pip3 \
-        /usr/local/bin/pip3.13
 
 COPY . .
 COPY scripts/orchestrator-entrypoint.sh /usr/local/bin/orchestrator-entrypoint

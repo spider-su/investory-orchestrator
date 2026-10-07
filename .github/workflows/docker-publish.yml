@@ -56,6 +56,15 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=sha-${{ github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Extract k3s image metadata
+        id: k3s-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: aserobaba/orchestrator
+          tags: |
+            type=raw,value=k3s-latest,enable={{is_default_branch}}
+            type=raw,value=k3s-sha-${{ github.event.workflow_run.head_sha || github.sha }}
+
       - name: Verify Docker build inputs
         run: |
           test -f Dockerfile
@@ -71,18 +80,41 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          target: full
+          cache-from: type=gha,scope=orchestrator-full
+          cache-to: type=gha,scope=orchestrator-full,mode=max
+
+      - name: Build and push k3s runtime image
+        id: k3s-image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: k3s
+          push: true
+          tags: ${{ steps.k3s-meta.outputs.tags }}
+          labels: ${{ steps.k3s-meta.outputs.labels }}
+          cache-from: type=gha,scope=orchestrator-k3s
+          cache-to: type=gha,scope=orchestrator-k3s,mode=max
 
       - name: Summarize published image
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          K3S_IMAGE_DIGEST: ${{ steps.k3s-image.outputs.digest }}
+          K3S_IMAGE_TAGS: ${{ steps.k3s-meta.outputs.tags }}
         run: |
           {
-            echo '### Published orchestrator image'
+            echo '### Published orchestrator images'
             echo
             echo '```text'
+            echo 'Full tooling image:'
             printf '%s\n' "$IMAGE_TAGS"
             echo "docker.io/aserobaba/orchestrator@${IMAGE_DIGEST}"
+            echo
+            echo 'k3s runtime image:'
+            printf '%s\n' "$K3S_IMAGE_TAGS"
+            echo "docker.io/aserobaba/orchestrator@${K3S_IMAGE_DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -90,6 +122,16 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: aserobaba/orchestrator@${{ steps.image.outputs.digest }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Scan published k3s runtime image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: aserobaba/orchestrator@${{ steps.k3s-image.outputs.digest }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
@@ -108,5 +150,20 @@ jobs:
         with:
           name: investory-orchestrator-image-sbom
           path: investory-orchestrator.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Generate k3s runtime SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: aserobaba/orchestrator@${{ steps.k3s-image.outputs.digest }}
+          artifact-name: investory-orchestrator-k3s-image.spdx.json
+          output-file: investory-orchestrator-k3s.spdx.json
+
+      - name: Upload k3s runtime SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: investory-orchestrator-k3s-image-sbom
+          path: investory-orchestrator-k3s.spdx.json
           if-no-files-found: error
           retention-days: 7
