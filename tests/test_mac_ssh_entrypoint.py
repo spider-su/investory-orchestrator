@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import fcntl
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +19,25 @@ from scripts.mac_ssh_entrypoint import (
 
 
 class MacSshEntrypointTests(unittest.TestCase):
+    def test_script_imports_repository_package_from_outside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            environment["SSH_ORIGINAL_COMMAND"] = "invalid"
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts/mac_ssh_entrypoint.py")],
+                cwd=directory,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("only health, submit", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
     def test_forced_command_runs_only_validated_task_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with (
