@@ -16,32 +16,61 @@ from typing import Any
 
 class TaskStatus(StrEnum):
     QUEUED = "QUEUED"
-    PLANNING = "PLANNING"
-    IMPLEMENTING = "IMPLEMENTING"
-    VALIDATING = "VALIDATING"
-    REVIEWING = "REVIEWING"
-    PUBLISHING = "PUBLISHING"
+    RUNNING = "RUNNING"
     WAITING_CI = "WAITING_CI"
-    FINAL_REVIEW = "FINAL_REVIEW"
     READY = "READY"
-    COMPLETED = "COMPLETED"
+    DONE = "DONE"
     BLOCKED = "BLOCKED"
-    FAILED = "FAILED"
+
+    # Source compatibility for workflow code and historical call sites. These
+    # aliases all persist one lifecycle state; phase belongs in metadata.
+    PLANNING = "RUNNING"
+    IMPLEMENTING = "RUNNING"
+    VALIDATING = "RUNNING"
+    REVIEWING = "RUNNING"
+    PUBLISHING = "RUNNING"
+    FINAL_REVIEW = "RUNNING"
+    COMPLETED = "DONE"
+    FAILED = "BLOCKED"
+
+
+class TaskPhase(StrEnum):
+    PREPARING = "preparing"
+    IMPLEMENTING = "implementing"
+    VALIDATING = "validating"
+    REVIEWING = "reviewing"
+    REPAIRING = "repairing"
+    PUBLISHING = "publishing"
+
+
+class JobKind(StrEnum):
+    IMPLEMENT = "IMPLEMENT"
+    REVIEW = "REVIEW"
+    REPAIR = "REPAIR"
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNCERTAIN = "uncertain"
+    CANCELLED = "cancelled"
+
+
+JOB_SECRET_KEY_PARTS = (
+    "token", "secret", "password", "private_key", "authorization", "credential",
+    "api_key",
+)
 
 
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
-    TaskStatus.QUEUED: frozenset({TaskStatus.PLANNING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.PLANNING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.IMPLEMENTING: frozenset({TaskStatus.VALIDATING, TaskStatus.PUBLISHING, TaskStatus.COMPLETED, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.VALIDATING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.REVIEWING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.REVIEWING: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.PUBLISHING, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.PUBLISHING: frozenset({TaskStatus.WAITING_CI, TaskStatus.COMPLETED, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.WAITING_CI: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.FINAL_REVIEW, TaskStatus.BLOCKED, TaskStatus.FAILED}),
-    TaskStatus.FINAL_REVIEW: frozenset({TaskStatus.IMPLEMENTING, TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.FAILED}),
+    TaskStatus.QUEUED: frozenset({TaskStatus.RUNNING, TaskStatus.BLOCKED}),
+    TaskStatus.RUNNING: frozenset({TaskStatus.WAITING_CI, TaskStatus.READY, TaskStatus.DONE, TaskStatus.BLOCKED}),
+    TaskStatus.WAITING_CI: frozenset({TaskStatus.RUNNING, TaskStatus.READY, TaskStatus.BLOCKED}),
     TaskStatus.READY: frozenset({TaskStatus.COMPLETED, TaskStatus.BLOCKED}),
-    TaskStatus.COMPLETED: frozenset(),
-    TaskStatus.BLOCKED: frozenset({TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.VALIDATING, TaskStatus.REVIEWING, TaskStatus.PUBLISHING, TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW, TaskStatus.READY, TaskStatus.COMPLETED, TaskStatus.FAILED}),
-    TaskStatus.FAILED: frozenset({TaskStatus.QUEUED}),
+    TaskStatus.DONE: frozenset(),
+    TaskStatus.BLOCKED: frozenset({TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_CI, TaskStatus.READY, TaskStatus.DONE}),
 }
 
 
@@ -223,6 +252,31 @@ class TaskStore:
                         f"SELECT {column_list} FROM tasks_legacy"
                     )
                     connection.execute("DROP TABLE tasks_legacy")
+            legacy_statuses = self._execute(
+                connection,
+                "SELECT task_id, status, metadata FROM tasks WHERE status IN ("
+                "'PLANNING', 'IMPLEMENTING', 'VALIDATING', 'REVIEWING', "
+                "'PUBLISHING', 'FINAL_REVIEW', 'COMPLETED', 'FAILED')",
+            ).fetchall()
+            status_map = {
+                "PLANNING": ("RUNNING", "preparing"),
+                "IMPLEMENTING": ("RUNNING", "implementing"),
+                "VALIDATING": ("RUNNING", "validating"),
+                "REVIEWING": ("RUNNING", "reviewing"),
+                "PUBLISHING": ("RUNNING", "publishing"),
+                "FINAL_REVIEW": ("RUNNING", "reviewing"),
+                "COMPLETED": ("DONE", "publishing"),
+                "FAILED": ("BLOCKED", "repairing"),
+            }
+            for legacy in legacy_statuses:
+                new_status, phase = status_map[legacy["status"]]
+                metadata = self._decode_json_field(legacy["metadata"], {})
+                metadata.setdefault("phase", phase)
+                self._execute(
+                    connection,
+                    "UPDATE tasks SET status=?, metadata=? WHERE task_id=?",
+                    (new_status, self._json_value(metadata), legacy["task_id"]),
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS tasks_status_created "
                 "ON tasks(status, priority, created_at)"
@@ -287,6 +341,133 @@ class TaskStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS task_activity_task_created "
                 "ON task_activity(task_id, created_at, activity_id)"
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS runners (
+                    runner_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'offline',
+                    capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    max_codex_processes INTEGER NOT NULL DEFAULT 1,
+                    max_builds INTEGER NOT NULL DEFAULT 1,
+                    version TEXT NOT NULL DEFAULT '',
+                    last_heartbeat_at DOUBLE PRECISION,
+                    updated_at DOUBLE PRECISION NOT NULL
+                )""" if self.is_postgres else """CREATE TABLE IF NOT EXISTS runners (
+                    runner_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'offline',
+                    capabilities TEXT NOT NULL DEFAULT '[]',
+                    max_codex_processes INTEGER NOT NULL DEFAULT 1,
+                    max_builds INTEGER NOT NULL DEFAULT 1,
+                    version TEXT NOT NULL DEFAULT '',
+                    last_heartbeat_at REAL,
+                    updated_at REAL NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS jobs (
+                    job_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    repository TEXT NOT NULL,
+                    base_branch TEXT NOT NULL,
+                    task_branch TEXT NOT NULL,
+                    base_sha TEXT NOT NULL DEFAULT '',
+                    expected_head_sha TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    job_spec JSONB NOT NULL,
+                    config_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    required_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    uses_codex BOOLEAN NOT NULL DEFAULT FALSE,
+                    uses_build BOOLEAN NOT NULL DEFAULT FALSE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    runner_id TEXT,
+                    current_attempt_id TEXT,
+                    lease_expires_at DOUBLE PRECISION,
+                    result JSONB,
+                    error JSONB,
+                    created_at DOUBLE PRECISION NOT NULL,
+                    updated_at DOUBLE PRECISION NOT NULL
+                )""" if self.is_postgres else """CREATE TABLE IF NOT EXISTS jobs (
+                    job_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    repository TEXT NOT NULL,
+                    base_branch TEXT NOT NULL,
+                    task_branch TEXT NOT NULL,
+                    base_sha TEXT NOT NULL DEFAULT '',
+                    expected_head_sha TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    job_spec TEXT NOT NULL,
+                    config_snapshot TEXT NOT NULL DEFAULT '{}',
+                    required_capabilities TEXT NOT NULL DEFAULT '[]',
+                    uses_codex INTEGER NOT NULL DEFAULT 0,
+                    uses_build INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    runner_id TEXT,
+                    current_attempt_id TEXT,
+                    lease_expires_at REAL,
+                    result TEXT,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS job_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                    attempt_number INTEGER NOT NULL,
+                    runner_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at DOUBLE PRECISION NOT NULL,
+                    heartbeat_at DOUBLE PRECISION NOT NULL,
+                    lease_expires_at DOUBLE PRECISION NOT NULL,
+                    worker_pid INTEGER,
+                    log_path TEXT NOT NULL DEFAULT '',
+                    finished_at DOUBLE PRECISION,
+                    result JSONB,
+                    error JSONB,
+                    UNIQUE(job_id, attempt_number)
+                )""" if self.is_postgres else """CREATE TABLE IF NOT EXISTS job_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                    attempt_number INTEGER NOT NULL,
+                    runner_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at REAL NOT NULL,
+                    heartbeat_at REAL NOT NULL,
+                    lease_expires_at REAL NOT NULL,
+                    worker_pid INTEGER,
+                    log_path TEXT NOT NULL DEFAULT '',
+                    finished_at REAL,
+                    result TEXT,
+                    error TEXT,
+                    UNIQUE(job_id, attempt_number)
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS jobs_pending_priority "
+                "ON jobs(status, priority DESC, created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS jobs_runner_status "
+                "ON jobs(runner_id, status)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS job_attempts_job_started "
+                "ON job_attempts(job_id, started_at)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running_per_task "
+                "ON jobs(task_id) WHERE status='running'"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running_per_branch "
+                "ON jobs(repository, task_branch) WHERE status='running'"
             )
             if self.is_postgres:
                 repository_config_table_exists = connection.execute(
@@ -398,11 +579,13 @@ class TaskStore:
             task_id = str(issue_number)
         else:
             task_id = f"{repository}#{issue_number}"
-        metadata_value: Any = json.dumps(metadata or {})
+        task_metadata = dict(metadata or {})
+        task_metadata.setdefault("phase", TaskPhase.PREPARING.value)
+        metadata_value: Any = json.dumps(task_metadata)
         if self.is_postgres:
             from psycopg.types.json import Jsonb
 
-            metadata_value = Jsonb(metadata or {})
+            metadata_value = Jsonb(task_metadata)
         with self._connection() as connection:
             self._execute(
                 connection,
@@ -438,6 +621,92 @@ class TaskStore:
             ).fetchone()
         return self._task(row)
 
+    def reserve_code_repair(
+        self,
+        task_id: str,
+        *,
+        fallback_limit: int,
+    ) -> dict[str, int] | None:
+        """Atomically reserve one task repair; return None when exhausted."""
+        if fallback_limit < 0:
+            raise ValueError("repair limit cannot be negative")
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            row = self._execute(
+                connection,
+                "SELECT metadata FROM tasks WHERE task_id=?"
+                + (" FOR UPDATE" if self.is_postgres else ""),
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown task: {task_id}")
+            metadata = self._decode_json_field(row["metadata"], {})
+            budget = metadata.get("repair_budget")
+            if budget is None:
+                budget = {"limit": fallback_limit, "used": 0}
+            if not isinstance(budget, dict):
+                raise ValueError(f"Invalid repair budget for task {task_id}")
+            limit, used = budget.get("limit", fallback_limit), budget.get("used", 0)
+            if (
+                isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+                or isinstance(used, bool) or not isinstance(used, int) or used < 0
+            ):
+                raise ValueError(f"Invalid repair budget for task {task_id}")
+            if used >= limit:
+                return None
+            budget = {"limit": limit, "used": used + 1}
+            metadata["repair_budget"] = budget
+            self._execute(
+                connection,
+                "UPDATE tasks SET metadata=?, updated_at=? WHERE task_id=?",
+                (self._json_value(metadata), time.time(), task_id),
+            )
+            created_at = time.time()
+            self._execute(
+                connection,
+                "INSERT INTO task_activity "
+                "(activity_id, task_id, actor, event_type, message, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    uuid.uuid4().hex, task_id, "orchestrator", "repair_reserved",
+                    f"Code repair budget {budget['used']}/{limit} reserved.",
+                    self._json_value(budget), created_at,
+                ),
+            )
+        return budget
+
+    def release_code_repair(self, task_id: str) -> dict[str, int]:
+        """Refund a reservation when a repair invocation produced no candidate."""
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            row = self._execute(
+                connection,
+                "SELECT metadata FROM tasks WHERE task_id=?"
+                + (" FOR UPDATE" if self.is_postgres else ""),
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown task: {task_id}")
+            metadata = self._decode_json_field(row["metadata"], {})
+            budget = metadata.get("repair_budget") or {"limit": 0, "used": 0}
+            if (
+                not isinstance(budget, dict)
+                or isinstance(budget.get("used"), bool)
+                or not isinstance(budget.get("used"), int)
+            ):
+                raise ValueError(f"Invalid repair budget for task {task_id}")
+            limit = budget.get("limit", 0)
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+                raise ValueError(f"Invalid repair budget for task {task_id}")
+            budget = {"limit": limit, "used": max(0, budget["used"] - 1)}
+            metadata["repair_budget"] = budget
+            self._execute(
+                connection,
+                "UPDATE tasks SET metadata=?, updated_at=? WHERE task_id=?",
+                (self._json_value(metadata), time.time(), task_id),
+            )
+        return budget
+
     def _sql(self, statement: str) -> str:
         return statement.replace("?", "%s") if self.is_postgres else statement
 
@@ -448,6 +717,491 @@ class TaskStore:
         params: tuple[Any, ...] = (),
     ) -> Any:
         return connection.execute(self._sql(statement), params)
+
+    def _json_value(self, value: Any) -> Any:
+        if self.is_postgres:
+            from psycopg.types.json import Jsonb
+
+            return Jsonb(value)
+        return json.dumps(value, separators=(",", ":"))
+
+    @staticmethod
+    def _decode_json_field(value: Any, default: Any) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return default
+        return value
+
+    def _job_row(self, row: Any) -> dict[str, Any]:
+        job = dict(row)
+        for field, default in (
+            ("job_spec", {}),
+            ("config_snapshot", {}),
+            ("required_capabilities", []),
+            ("result", None),
+            ("error", None),
+        ):
+            job[field] = self._decode_json_field(job.get(field), default)
+        return job
+
+    @staticmethod
+    def _contains_secret_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized = str(key).casefold().replace("-", "_")
+                if any(part in normalized for part in JOB_SECRET_KEY_PARTS):
+                    return True
+                if TaskStore._contains_secret_key(nested):
+                    return True
+        elif isinstance(value, (list, tuple)):
+            return any(TaskStore._contains_secret_key(item) for item in value)
+        return False
+
+    def register_runner(
+        self,
+        runner_id: str,
+        *,
+        capabilities: set[str] | list[str] | tuple[str, ...],
+        max_codex_processes: int = 1,
+        max_builds: int = 1,
+        version: str = "",
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", runner_id):
+            raise ValueError("invalid runner identity")
+        if max_codex_processes < 1 or max_builds < 1:
+            raise ValueError("runner capacities must be positive")
+        normalized_capabilities = sorted({str(value) for value in capabilities})
+        if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value) for value in normalized_capabilities):
+            raise ValueError("invalid runner capability")
+        now = time.time()
+        with self._connection() as connection:
+            self._execute(
+                connection,
+                """INSERT INTO runners
+                (runner_id, status, capabilities, max_codex_processes, max_builds,
+                 version, last_heartbeat_at, updated_at)
+                VALUES (?, 'online', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(runner_id) DO UPDATE SET
+                  status='online', capabilities=excluded.capabilities,
+                  max_codex_processes=excluded.max_codex_processes,
+                  max_builds=excluded.max_builds, version=excluded.version,
+                  last_heartbeat_at=excluded.last_heartbeat_at,
+                  updated_at=excluded.updated_at""",
+                (runner_id, self._json_value(normalized_capabilities),
+                 max_codex_processes, max_builds, version[:160], now, now),
+            )
+            row = self._execute(
+                connection, "SELECT * FROM runners WHERE runner_id=?", (runner_id,),
+            ).fetchone()
+        runner = dict(row)
+        runner["capabilities"] = self._decode_json_field(runner["capabilities"], [])
+        return runner
+
+    def heartbeat_runner(self, runner_id: str, *, status: str = "online") -> bool:
+        now = time.time()
+        with self._connection() as connection:
+            cursor = self._execute(
+                connection,
+                "UPDATE runners SET status=?, last_heartbeat_at=?, updated_at=? "
+                "WHERE runner_id=?",
+                (status, now, now, runner_id),
+            )
+        return cursor.rowcount == 1
+
+    def list_runners(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection, "SELECT * FROM runners ORDER BY runner_id",
+            ).fetchall()
+        runners = []
+        for row in rows:
+            runner = dict(row)
+            runner["capabilities"] = self._decode_json_field(
+                runner.get("capabilities"), []
+            )
+            runners.append(runner)
+        return runners
+
+    def enqueue_job(
+        self,
+        spec: dict[str, Any],
+        *,
+        job_id: str | None = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
+        required = (
+            "task_id", "kind", "repository", "base_branch", "task_branch",
+            "prompt", "config_snapshot", "required_capabilities",
+        )
+        missing = [name for name in required if name not in spec]
+        if missing:
+            raise ValueError(f"job spec is missing fields: {', '.join(missing)}")
+        if not isinstance(spec["kind"], str) or spec["kind"] not in {item.value for item in JobKind}:
+            raise ValueError("invalid job kind")
+        task_id = str(spec["task_id"])
+        if self.get(task_id) is None:
+            raise KeyError(f"Unknown task: {task_id}")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(spec["repository"])):
+            raise ValueError("invalid repository identity")
+        for field in ("base_branch", "task_branch"):
+            value = spec[field]
+            if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", value):
+                raise ValueError(f"invalid {field}")
+        for field in ("base_sha", "expected_head_sha"):
+            value = spec.get(field)
+            if value not in (None, "") and not re.fullmatch(r"[0-9a-f]{40}", str(value)):
+                raise ValueError(f"invalid {field}")
+        if not isinstance(spec["prompt"], str):
+            raise ValueError("job prompt must be a string")
+        if not isinstance(spec["config_snapshot"], dict):
+            raise ValueError("job config_snapshot must be an object")
+        if self._contains_secret_key(spec["config_snapshot"]):
+            raise ValueError("job config_snapshot must not contain secrets")
+        capabilities = spec["required_capabilities"]
+        if not isinstance(capabilities, (list, tuple, set)) or any(
+            not isinstance(item, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", item)
+            for item in capabilities
+        ):
+            raise ValueError("required_capabilities must be a list of capability names")
+        canonical_spec = json.loads(json.dumps(spec, sort_keys=True, separators=(",", ":")))
+        job_id = job_id or uuid.uuid4().hex
+        if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise ValueError("job_id must be a 32-character lowercase hexadecimal ID")
+        now = time.time()
+        uses_codex = "codex" in capabilities
+        uses_build = "build" in capabilities
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            existing = self._execute(
+                connection, "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+            if existing is not None:
+                saved = self._job_row(existing)
+                if saved["job_spec"] != canonical_spec:
+                    raise ValueError("job ID already exists with different immutable context")
+                return saved
+            self._execute(
+                connection,
+                """INSERT INTO jobs
+                (job_id, task_id, kind, repository, base_branch, task_branch, base_sha,
+                 expected_head_sha, prompt, job_spec, config_snapshot, required_capabilities,
+                 uses_codex, uses_build, status, priority, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                (job_id, task_id, spec["kind"], spec["repository"], spec["base_branch"],
+                 spec["task_branch"], spec.get("base_sha") or "",
+                 spec.get("expected_head_sha") or "", spec["prompt"],
+                 self._json_value(canonical_spec), self._json_value(spec["config_snapshot"]),
+                 self._json_value(sorted(set(capabilities))), uses_codex, uses_build,
+                 priority, now, now),
+            )
+            row = self._execute(
+                connection, "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+        return self._job_row(row)
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = self._execute(
+                connection, "SELECT * FROM jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
+        return self._job_row(row) if row else None
+
+    def list_jobs(self, statuses: set[JobStatus] | None = None) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            if statuses:
+                values = [status.value for status in statuses]
+                marks = ",".join("?" for _ in values)
+                rows = self._execute(
+                    connection,
+                    f"SELECT * FROM jobs WHERE status IN ({marks}) ORDER BY priority DESC, created_at",
+                    tuple(values),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    connection, "SELECT * FROM jobs ORDER BY priority DESC, created_at",
+                ).fetchall()
+        return [self._job_row(row) for row in rows]
+
+    def claim_job(
+        self,
+        runner_id: str,
+        *,
+        lease_seconds: int = 90,
+    ) -> dict[str, Any] | None:
+        if lease_seconds < 10:
+            raise ValueError("job lease must be at least 10 seconds")
+        now = time.time()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            runner_query = "SELECT * FROM runners WHERE runner_id=?"
+            if self.is_postgres:
+                runner_query += " FOR UPDATE"
+            runner = self._execute(connection, runner_query, (runner_id,)).fetchone()
+            if runner is None or runner["status"] != "online":
+                raise RuntimeError("runner must be registered and online before claiming jobs")
+            stale_after = max(lease_seconds * 3, 180)
+            if now - float(runner["last_heartbeat_at"] or 0) > stale_after:
+                self._execute(
+                    connection,
+                    "UPDATE runners SET status='offline', updated_at=? WHERE runner_id=?",
+                    (now, runner_id),
+                )
+                connection.commit()
+                return None
+            runner_capabilities = set(
+                self._decode_json_field(runner["capabilities"], [])
+            )
+            pending_query = (
+                "SELECT * FROM jobs WHERE status='pending' "
+                "ORDER BY priority DESC, created_at LIMIT 50"
+            )
+            if self.is_postgres:
+                pending_query = (
+                    "SELECT * FROM jobs WHERE status='pending' "
+                    "ORDER BY priority DESC, created_at LIMIT 50 FOR UPDATE SKIP LOCKED"
+                )
+            candidates = self._execute(connection, pending_query).fetchall()
+            active = self._execute(
+                connection,
+                "SELECT uses_codex, uses_build FROM jobs WHERE runner_id=? AND status='running'",
+                (runner_id,),
+            ).fetchall()
+            codex_in_use = sum(bool(row["uses_codex"]) for row in active)
+            builds_in_use = sum(bool(row["uses_build"]) for row in active)
+            for candidate in candidates:
+                required = set(self._decode_json_field(candidate["required_capabilities"], []))
+                if not required.issubset(runner_capabilities):
+                    continue
+                uses_codex = bool(candidate["uses_codex"])
+                uses_build = bool(candidate["uses_build"])
+                if uses_codex and codex_in_use >= runner["max_codex_processes"]:
+                    continue
+                if uses_build and builds_in_use >= runner["max_builds"]:
+                    continue
+                task_query = "SELECT task_id FROM tasks WHERE task_id=?"
+                if self.is_postgres:
+                    task_query += " FOR UPDATE"
+                self._execute(connection, task_query, (candidate["task_id"],)).fetchone()
+                active_for_task = self._execute(
+                    connection,
+                    "SELECT job_id FROM jobs WHERE status='running' AND "
+                    "(task_id=? OR (repository=? AND task_branch=?)) LIMIT 1",
+                    (candidate["task_id"], candidate["repository"], candidate["task_branch"]),
+                ).fetchone()
+                if active_for_task is not None:
+                    continue
+                attempt_id = uuid.uuid4().hex
+                attempt_number = int(candidate["attempt_count"]) + 1
+                lease_expires_at = now + lease_seconds
+                updated = self._execute(
+                    connection,
+                    """UPDATE jobs SET status='running', attempt_count=?, runner_id=?,
+                    current_attempt_id=?, lease_expires_at=?, updated_at=?
+                    WHERE job_id=? AND status='pending'""",
+                    (attempt_number, runner_id, attempt_id, lease_expires_at, now,
+                     candidate["job_id"]),
+                )
+                if updated.rowcount != 1:
+                    continue
+                self._execute(
+                    connection,
+                    """INSERT INTO job_attempts
+                    (attempt_id, job_id, attempt_number, runner_id, status, started_at,
+                     heartbeat_at, lease_expires_at)
+                    VALUES (?, ?, ?, ?, 'running', ?, ?, ?)""",
+                    (attempt_id, candidate["job_id"], attempt_number, runner_id, now, now,
+                     lease_expires_at),
+                )
+                self._execute(
+                    connection,
+                    "UPDATE runners SET last_heartbeat_at=?, updated_at=? WHERE runner_id=?",
+                    (now, now, runner_id),
+                )
+                row = self._execute(
+                    connection, "SELECT * FROM jobs WHERE job_id=?", (candidate["job_id"],),
+                ).fetchone()
+                job = self._job_row(row)
+                connection.commit()
+                return job
+            connection.commit()
+            return None
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def heartbeat_job(
+        self,
+        job_id: str,
+        runner_id: str,
+        attempt_id: str,
+        *,
+        lease_seconds: int = 90,
+    ) -> bool:
+        if lease_seconds < 10:
+            raise ValueError("job lease must be at least 10 seconds")
+        now = time.time()
+        lease_expires_at = now + lease_seconds
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            updated = self._execute(
+                connection,
+                """UPDATE jobs SET lease_expires_at=?, updated_at=?
+                WHERE job_id=? AND runner_id=? AND current_attempt_id=?
+                  AND status='running' AND lease_expires_at>=?""",
+                (lease_expires_at, now, job_id, runner_id, attempt_id, now),
+            )
+            if updated.rowcount != 1:
+                return False
+            self._execute(
+                connection,
+                """UPDATE job_attempts SET heartbeat_at=?, lease_expires_at=?
+                WHERE attempt_id=? AND job_id=? AND runner_id=? AND status='running'""",
+                (now, lease_expires_at, attempt_id, job_id, runner_id),
+            )
+            self._execute(
+                connection,
+                "UPDATE runners SET last_heartbeat_at=?, updated_at=? WHERE runner_id=?",
+                (now, now, runner_id),
+            )
+        return True
+
+    def record_job_process(
+        self,
+        job_id: str,
+        runner_id: str,
+        attempt_id: str,
+        *,
+        worker_pid: int,
+        log_path: str,
+    ) -> bool:
+        if worker_pid < 1:
+            raise ValueError("worker PID must be positive")
+        now = time.time()
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            updated = self._execute(
+                connection,
+                """UPDATE job_attempts SET worker_pid=?, log_path=?
+                WHERE attempt_id=? AND job_id=? AND runner_id=? AND status='running'
+                  AND EXISTS (SELECT 1 FROM jobs WHERE job_id=? AND runner_id=?
+                    AND current_attempt_id=? AND status='running' AND lease_expires_at>=?)""",
+                (worker_pid, log_path, attempt_id, job_id, runner_id,
+                 job_id, runner_id, attempt_id, now),
+            )
+        return updated.rowcount == 1
+
+    def complete_job(
+        self,
+        job_id: str,
+        runner_id: str,
+        attempt_id: str,
+        *,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> bool:
+        if (result is None) == (error is None):
+            raise ValueError("provide exactly one of result or error")
+        status = JobStatus.SUCCEEDED.value if error is None else JobStatus.FAILED.value
+        now = time.time()
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            updated = self._execute(
+                connection,
+                """UPDATE jobs SET status=?, result=?, error=?, lease_expires_at=NULL,
+                updated_at=? WHERE job_id=? AND runner_id=? AND current_attempt_id=?
+                  AND status='running' AND lease_expires_at>=?""",
+                (status, self._json_value(result) if result is not None else None,
+                 self._json_value(error) if error is not None else None,
+                 now, job_id, runner_id, attempt_id, now),
+            )
+            if updated.rowcount != 1:
+                return False
+            self._execute(
+                connection,
+                """UPDATE job_attempts SET status=?, result=?, error=?, finished_at=?,
+                heartbeat_at=? WHERE attempt_id=? AND job_id=? AND runner_id=?
+                  AND status='running'""",
+                (status, self._json_value(result) if result is not None else None,
+                 self._json_value(error) if error is not None else None,
+                 now, now, attempt_id, job_id, runner_id),
+            )
+        return True
+
+    def mark_expired_jobs_uncertain(self, *, now: float | None = None) -> list[str]:
+        cutoff = time.time() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            query = (
+                "SELECT job_id, current_attempt_id FROM jobs "
+                "WHERE status='running' AND lease_expires_at<?"
+            )
+            if self.is_postgres:
+                query += " FOR UPDATE SKIP LOCKED"
+            rows = self._execute(connection, query, (cutoff,)).fetchall()
+            expired: list[str] = []
+            for row in rows:
+                self._execute(
+                    connection,
+                    "UPDATE jobs SET status='uncertain', updated_at=? "
+                    "WHERE job_id=? AND status='running' AND current_attempt_id=?",
+                    (cutoff, row["job_id"], row["current_attempt_id"]),
+                )
+                if row["current_attempt_id"]:
+                    self._execute(
+                        connection,
+                        "UPDATE job_attempts SET status='uncertain' WHERE attempt_id=? "
+                        "AND status='running'",
+                        (row["current_attempt_id"],),
+                    )
+                expired.append(row["job_id"])
+            connection.commit()
+            return expired
+        finally:
+            connection.close()
+
+    def safely_requeue_uncertain_job(
+        self,
+        job_id: str,
+        attempt_id: str,
+        *,
+        previous_process_stopped: bool,
+    ) -> bool:
+        if not previous_process_stopped:
+            raise ValueError("uncertain job requeue requires proof the previous process stopped")
+        now = time.time()
+        with self._connection() as connection:
+            connection.execute("BEGIN" if self.is_postgres else "BEGIN IMMEDIATE")
+            updated = self._execute(
+                connection,
+                """UPDATE jobs SET status='pending', runner_id=NULL,
+                current_attempt_id=NULL, lease_expires_at=NULL, result=NULL, error=NULL,
+                updated_at=? WHERE job_id=? AND status='uncertain' AND current_attempt_id=?""",
+                (now, job_id, attempt_id),
+            )
+        return updated.rowcount == 1
+
+    def list_job_attempts(self, job_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = self._execute(
+                connection,
+                "SELECT * FROM job_attempts WHERE job_id=? ORDER BY attempt_number",
+                (job_id,),
+            ).fetchall()
+        attempts = []
+        for row in rows:
+            attempt = dict(row)
+            for field in ("result", "error"):
+                attempt[field] = self._decode_json_field(attempt.get(field), None)
+            attempts.append(attempt)
+        return attempts
 
     def get(self, task_id: str) -> Task | None:
         with self._connection() as connection:

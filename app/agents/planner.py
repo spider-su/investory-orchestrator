@@ -62,6 +62,47 @@ class PlannerError(RuntimeError):
     pass
 
 
+def consolidate_plan(plan: ImplementationPlan) -> ImplementationPlan:
+    """Keep all plan requirements but make implementation one coding pass."""
+    if len(plan.steps) <= 1:
+        return plan
+    step = PlanStep(
+        id="implementation",
+        title="Implement the complete task",
+        goal=plan.goal,
+        requirements=list(dict.fromkeys(
+            requirement
+            for item in plan.steps
+            for requirement in item.requirements
+        )),
+        acceptance_criteria=list(dict.fromkeys(
+            criterion
+            for item in plan.steps
+            for criterion in item.acceptance_criteria
+        )),
+        validation=list(dict.fromkeys(
+            command
+            for item in plan.steps
+            for command in item.validation
+        )),
+        affected_areas=list(dict.fromkeys(
+            area for item in plan.steps for area in item.affected_areas
+        )),
+        out_of_scope=list(dict.fromkeys(
+            value for item in plan.steps for value in item.out_of_scope
+        )),
+        depends_on=[],
+    )
+    return plan.model_copy(update={
+        "summary": (
+            f"{plan.summary}\n\n"
+            "The implementation plan is consolidated into one coding pass; "
+            "all issue-level acceptance criteria remain in force."
+        ),
+        "steps": [step],
+    })
+
+
 def create_plan(
     *,
     issue_number: int,

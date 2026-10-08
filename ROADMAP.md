@@ -34,7 +34,7 @@ completion gate.
 | **Hardening:** Whole-plan architectural review | Yes | No | No |
 | **Hardening:** Cross-step integration repair | Yes | No | No |
 | **Hardening:** Final logical history rewrite | Yes | No | No |
-| **Hardening:** Automatic issue-contract validation | No | No | No |
+| **Hardening:** Automatic issue-contract validation | Yes | No | No |
 | **Hardening:** Complete graph and routing test coverage | No | No | No |
 | **Hardening:** Complete side-effect intent and resume reconciliation | No | No | No |
 | **Hardening:** Final-review independence before READY | Yes | No | No |
@@ -50,6 +50,10 @@ completion gate.
 | **POC:** PostgreSQL-backed tasks and LangGraph checkpoints | Yes | No | No |
 | **POC:** Repository configuration CRUD and task dashboard | Yes | No | No |
 | **POC:** k3s scheduler to devMac SSH worker dispatch | Yes | No | No |
+| **Migration:** PostgreSQL job/attempt storage and standalone pull runner | Yes (local foundation) | No | No |
+| **Migration:** Single-step implementation and one final review (opt-in) | Yes (local foundation) | No | No |
+| **Migration:** Durable shared task-level code-repair budget | Yes (local foundation) | No | No |
+| **Migration:** Six lifecycle states with separate task phases | Yes (local foundation) | No | No |
 | **POC:** READY/BLOCKED GitHub issue mention | Yes | No | No |
 | **POC:** GitHub Projects tracking and priority synchronization | No | No | No |
 
@@ -88,8 +92,8 @@ state for safe resume.
 
 ## Priority 2 — Complete safety and validation hardening
 
-- Add automatic issue-contract validation before workspace creation and
-  planning.
+- Verify invalid issue-contract rejection before workspace creation and
+  planning in the live scheduler.
 - Add graph tests for every conditional route and retry boundary.
 - Test resume from environment, coder, reviewer, validation, push, and PR
   failures.
@@ -113,8 +117,8 @@ state for safe resume.
 - Verify whole-plan repair and final history rewriting.
 - Run repeated live verification for GitHub Actions polling, repair, and
   final-review gating.
-- Keep task PRs draft until automated gates pass; merge only after configured
-  human approval, then retain a separate manual release-promotion PR.
+- Keep task PRs draft until automated gates pass; leave review and merge to the
+  human, then detect the merge and mark the task done after post-merge CI.
 
 ## Priority 3 — Improve diagnostics and recovery
 
@@ -156,18 +160,28 @@ runner and confirm the ready-for-review mention and post-merge completion.
 
 ## Recommended delivery order
 
-1. Pass all supervised MVP scenarios.
-2. Add graph and resume integration tests.
-3. Implement write-ahead side-effect intent and uncertain-completion
+1. Complete PostgreSQL runner integration and isolated database/restart tests;
+   keep SSH dispatch authoritative until that evidence passes.
+2. Implement the single Codex workflow, shared repair budget, and exact-SHA
+   independent review gate.
+3. Verify the six-state lifecycle migration and scheduler reconciliation against
+   the PostgreSQL development schema, then run acceptance workflows before
+   selecting PostgreSQL pull mode.
+4. Remove legacy graph/SSH/release behavior only after active tasks are safely
+   migrated and rollback is documented.
+
+5. Pass all supervised MVP scenarios.
+6. Add graph and resume integration tests.
+7. Implement write-ahead side-effect intent and uncertain-completion
    reconciliation.
-4. Add automatic issue-contract validation.
-5. Improve blocked-state reporting and recovery controls.
-6. Add independent GitHub Actions validation.
-7. Verify retry isolation, whole-plan repair, and history rewriting.
-8. Introduce pluggable agent backends and prompt builders.
-9. Add structured repository metadata and operational telemetry.
-10. Verify automatic `ready_to_develop` intake against the deployed runner.
-11. Add webhook intake and optional parallelism if polling is insufficient.
+8. Add automatic issue-contract validation.
+9. Improve blocked-state reporting and recovery controls.
+10. Add independent GitHub Actions validation.
+11. Verify retry isolation, whole-plan repair, and history rewriting.
+12. Introduce pluggable agent backends and prompt builders.
+13. Add structured repository metadata and operational telemetry.
+14. Verify automatic `ready_to_develop` intake against the deployed runner.
+15. Add webhook intake and optional parallelism if polling is insufficient.
 
 ## POC — k3s scheduler and devMac execution
 

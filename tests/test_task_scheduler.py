@@ -15,6 +15,9 @@ from app.task_scheduler import (
     _poll_ci,
     _notify_terminal_tasks,
     _poll_ready_issues,
+    _queue_pull_runner_job,
+    _reconcile_pull_runner_jobs,
+    _run_final_review,
     _remote_worker_command,
     _remote_worker_is_running,
     _refresh_runner_health,
@@ -23,7 +26,7 @@ from app.task_scheduler import (
     reconcile_merged_task,
     run_queue,
 )
-from app.tasks import TaskStatus, TaskStore
+from app.tasks import JobKind, JobStatus, TaskStatus, TaskStore
 
 
 VALID_READY_ISSUE_BODY = """## Goal
@@ -70,6 +73,19 @@ class TaskSchedulerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
         self.repository_env.stop()
+
+    def test_ci_poll_ignores_running_tasks_outside_post_ci_review_phase(self) -> None:
+        task = self.store.create(title="Still implementing")
+        self.store.transition(
+            task.task_id,
+            TaskStatus.RUNNING,
+            metadata={**task.metadata, "phase": "implementing"},
+        )
+        with patch("app.task_scheduler._poll_merged_tasks"):
+            with patch("app.github_client.GitHubAppClient") as client:
+                _poll_ci(self.store)
+
+        client.assert_not_called()
 
     def test_resuming_status_clears_stale_blocked_details(self) -> None:
         task = self.store.create(title="resume", issue_number=104)
@@ -136,10 +152,10 @@ class TaskSchedulerTests(unittest.TestCase):
         with redirect_stdout(output):
             _print_task(task)
 
-        self.assertIn("COMPLETED", output.getvalue())
+        self.assertIn("DONE", output.getvalue())
         self.assertIn("Merged by: spider-su", output.getvalue())
         self.assertIn("Issue closed: True", output.getvalue())
-        self.assertIn("Task completed after authorized merge", output.getvalue())
+        self.assertIn("Task completed after human merge", output.getvalue())
         self.assertNotIn("Human action:", output.getvalue())
 
     def test_remote_worker_command_uses_quoted_configured_mac_paths(self) -> None:
@@ -158,6 +174,196 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes", command)
         self.assertIn("codex@192.168.1.7", command)
         self.assertEqual(command[-1], "run 42 42 - 0 0 unknown")
+
+    def test_pull_dispatch_persists_job_and_task_reservation(self) -> None:
+        task = self.store.create(
+            issue_number=208, title="Pull task", body="Acceptance criteria",
+            repository="spider-su/investory",
+            metadata={"base_branch": "develop"},
+        )
+        with patch.dict(os.environ, {"RUNNER_TRANSPORT": "postgres_pull"}, clear=False):
+            job = _queue_pull_runner_job(
+                self.store, task, expected_status=TaskStatus.QUEUED,
+                claimed_status=TaskStatus.PLANNING, kind=JobKind.IMPLEMENT,
+            )
+
+        current = self.store.get(task.task_id)
+        self.assertEqual(current.status, TaskStatus.PLANNING)
+        self.assertEqual(current.metadata["worker_mode"], "postgres_pull")
+        self.assertEqual(current.metadata["runner_job_id"], job["job_id"])
+        self.assertEqual(job["status"], JobStatus.PENDING.value)
+        self.assertEqual(job["task_branch"], "agent/issue-208")
+        self.assertEqual(job["required_capabilities"], ["build", "codex", "git", "review"])
+        self.assertNotIn("token", str(job["job_spec"]).casefold())
+
+    def test_pull_queue_enqueues_without_starting_synchronous_worker(self) -> None:
+        repository = "spider-su/investory"
+        self.store.save_repository({
+            "repository": repository, "enabled": True, "base_branch": "develop",
+        })
+        self.store.register_runner(
+            "pull-runner", capabilities={"codex", "git", "build", "review"},
+        )
+        self.store.set_service_status("runner", "ready", "test runner online", {})
+        self.store.set_service_status(
+            "codex_quota", "healthy", "test quota available",
+            {"remaining_percent": 100},
+        )
+        task = self.store.create(
+            issue_number=211, title="Queued pull task", body="Prompt",
+            repository=repository,
+        )
+        environment = {
+            "RUNNER_TRANSPORT": "postgres_pull",
+            "MAX_ACTIVE_TASKS": "1",
+            "MAX_CODEX_PROCESSES": "1",
+            "MAX_BUILDS": "1",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            with patch("app.task_scheduler._poll_ready_issues"):
+                with patch("app.task_scheduler._refresh_runner_health"):
+                    with patch("app.task_scheduler._poll_ci"):
+                        with patch("app.task_scheduler._notify_terminal_tasks"):
+                            with patch(
+                                "app.task_scheduler.subprocess.Popen",
+                                side_effect=AssertionError("pull mode must not spawn SSH/local workers"),
+                            ):
+                                run_queue(self.store, once=True)
+
+        current = self.store.get(task.task_id)
+        self.assertEqual(current.status, TaskStatus.PLANNING)
+        self.assertEqual(current.metadata["worker_mode"], "postgres_pull")
+        self.assertEqual(
+            self.store.get_job(current.metadata["runner_job_id"])["status"],
+            JobStatus.PENDING.value,
+        )
+
+    def test_pull_job_reconciliation_restores_reserved_job_after_scheduler_restart(self) -> None:
+        task = self.store.create(
+            title="Reserved task", body="Prompt", repository="spider-su/investory",
+        )
+        job = _queue_pull_runner_job(
+            self.store, task, expected_status=TaskStatus.QUEUED,
+            claimed_status=TaskStatus.PLANNING, kind=JobKind.IMPLEMENT,
+        )
+        with self.store._connection() as connection:
+            connection.execute("DELETE FROM jobs WHERE job_id=?", (job["job_id"],))
+
+        _reconcile_pull_runner_jobs(self.store)
+
+        restored = self.store.get_job(job["job_id"])
+        self.assertEqual(restored["status"], JobStatus.PENDING.value)
+        self.assertEqual(self.store.get(task.task_id).status, TaskStatus.PLANNING)
+
+    def test_pull_job_completion_is_reconciled_without_retrying_running_work(self) -> None:
+        task = self.store.create(
+            issue_number=209, title="Completed remote task", body="Prompt",
+            repository="spider-su/investory",
+        )
+        job = _queue_pull_runner_job(
+            self.store, task, expected_status=TaskStatus.QUEUED,
+            claimed_status=TaskStatus.PLANNING, kind=JobKind.IMPLEMENT,
+        )
+        self.store.register_runner(
+            "runner-1", capabilities={"codex", "git", "build", "review"},
+        )
+        claimed = self.store.claim_job("runner-1")
+        self.store.transition(task.task_id, TaskStatus.IMPLEMENTING)
+        self.store.transition(task.task_id, TaskStatus.VALIDATING)
+        self.store.transition(task.task_id, TaskStatus.REVIEWING)
+        self.store.transition(task.task_id, TaskStatus.PUBLISHING)
+        self.store.transition(task.task_id, TaskStatus.WAITING_CI, ci_status="queued")
+        self.store.complete_job(
+            job["job_id"], "runner-1", claimed["current_attempt_id"],
+            result={"task_status": "WAITING_CI"},
+        )
+
+        _reconcile_pull_runner_jobs(self.store)
+
+        current = self.store.get(task.task_id)
+        self.assertEqual(current.status, TaskStatus.WAITING_CI)
+        self.assertNotIn("runner_job_id", current.metadata)
+        self.assertEqual(current.metadata["last_runner_job"]["status"], "succeeded")
+        self.assertEqual(current.metadata["runner_dispatch_sequence"], 1)
+
+    def test_pull_final_review_is_queued_and_reconciled_asynchronously(self) -> None:
+        task = self.store.create(
+            issue_number=210, title="Final review task", body="Prompt",
+            repository="spider-su/investory",
+            metadata={
+                "base_branch": "develop",
+                "issue_number": 210,
+                "issue_title": "Final review task",
+                "issue_body": "Prompt",
+                "plan": {"summary": "Fixture plan", "steps": []},
+                "final_validation_status": "validation_success",
+                "final_validation_output": "validation passed",
+                "coder_model": "codex-coder",
+                "coder_provider": "codex-cli",
+            },
+        )
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.IMPLEMENTING)
+        task = self.store.transition(task.task_id, TaskStatus.VALIDATING)
+        task = self.store.transition(task.task_id, TaskStatus.REVIEWING)
+        task = self.store.transition(task.task_id, TaskStatus.PUBLISHING)
+        task = self.store.transition(
+            task.task_id, TaskStatus.WAITING_CI, ci_status="green",
+            workspace="/runner/workspaces/issue-210", branch="agent/issue-210",
+            pr_number=210, pr_url="https://github.com/spider-su/investory/pull/210",
+        )
+        task = self.store.transition(task.task_id, TaskStatus.FINAL_REVIEW)
+        github = SimpleNamespace(get_pull_request_details=lambda _number: {
+            "is_merged": False,
+            "state": "open",
+            "base_ref": "develop",
+            "head_ref": "agent/issue-210",
+            "head_sha": "b" * 40,
+        })
+        environment = {
+            "RUNNER_TRANSPORT": "postgres_pull",
+            "GITHUB_APP_ID": "test-app",
+            "BASE_BRANCH": "develop",
+            "REVIEWER_MODEL": "codex-reviewer",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            with patch("app.github_client.GitHubAppClient", return_value=github):
+                _run_final_review(self.store, task)
+
+        waiting = self.store.get(task.task_id)
+        job_id = waiting.metadata["final_review_job_id"]
+        review_job = self.store.get_job(job_id)
+        self.assertEqual(review_job["kind"], JobKind.REVIEW.value)
+        self.assertEqual(review_job["status"], JobStatus.PENDING.value)
+        self.assertEqual(waiting.status, TaskStatus.FINAL_REVIEW)
+
+        self.store.register_runner(
+            "review-runner", capabilities={"codex", "git", "review"},
+        )
+        claimed = self.store.claim_job("review-runner")
+        review_result = {
+            "task_id": task.task_id,
+            "head_sha": "b" * 40,
+            "branch": "agent/issue-210",
+            "clean_worktree": True,
+            "review": {"status": "approved", "summary": "Looks correct."},
+            "reviewer_identity": {
+                "backend": "codex-cli", "provider": "codex-cli",
+                "model": "codex-reviewer",
+            },
+        }
+        self.store.complete_job(
+            job_id, "review-runner", claimed["current_attempt_id"],
+            result={"worker_result": review_result},
+        )
+        with patch.dict(os.environ, environment, clear=False):
+            with patch("app.github_client.GitHubAppClient", return_value=github):
+                _run_final_review(self.store, self.store.get(task.task_id))
+
+        completed_review = self.store.get(task.task_id)
+        self.assertEqual(completed_review.status, TaskStatus.READY)
+        self.assertEqual(completed_review.metadata["final_review_head_sha"], "b" * 40)
+        self.assertNotIn("final_review_job_id", completed_review.metadata)
 
     def test_remote_worker_rejects_invalid_ssh_target(self) -> None:
         task = self.store.create(title="remote", issue_number=43)

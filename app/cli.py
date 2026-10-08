@@ -41,6 +41,9 @@ def build_initial_state(
     title: str = "",
     body: str = "",
 ) -> WorkflowState:
+    workflow_mode = os.getenv("WORKFLOW_MODE", "legacy").strip().lower()
+    if workflow_mode not in {"legacy", "simplified"}:
+        raise ValueError("WORKFLOW_MODE must be 'legacy' or 'simplified'")
     return {
         "task_id": task_id,
         "task_source": source,
@@ -50,6 +53,9 @@ def build_initial_state(
         "issue_body": body,
         "repository_context": "",
         "workflow_status": "new",
+        # Persist the selected route in the checkpoint. Older checkpoints do
+        # not contain this field and therefore continue on the legacy route.
+        "workflow_mode": workflow_mode,
         "plan": {},
         "plan_markdown": "",
         "plan_published": False,
@@ -392,6 +398,13 @@ def run_cli(
                     task_store,
                     args.task_id,
                     status,
+                    phase={
+                        "planning": "preparing",
+                        "implementing": "implementing",
+                        "validating": "validating",
+                        "reviewing": "reviewing",
+                        "publishing": "publishing",
+                    }.get(state.get("workflow_status", "")),
                     workspace=state.get("workspace", ""),
                     branch=state.get("branch", ""),
                     implementation_attempts=(

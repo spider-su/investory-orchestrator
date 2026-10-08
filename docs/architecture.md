@@ -40,18 +40,21 @@ results, reviewer findings, draft-PR creation, and CI outcomes in timestamp
 order. This feed records workflow activity; it does not accept messages or
 alter task execution.
 
-Task states are `QUEUED`, `PLANNING`, `IMPLEMENTING`, `VALIDATING`,
-`REVIEWING`, `PUBLISHING`, `WAITING_CI`, `FINAL_REVIEW`, `READY`, `COMPLETED`,
-`BLOCKED`, and `FAILED`. SQLite persists local task records separately from LangGraph
-checkpoints, while the k3s POC stores both in PostgreSQL under the configured
-schema. The queue claims a task in a transaction before launching its worker.
+Task lifecycle states are `QUEUED`, `RUNNING`, `WAITING_CI`, `READY`, `DONE`,
+and `BLOCKED`. The operational phase (`preparing`, `implementing`,
+`validating`, `reviewing`, `repairing`, or `publishing`) is stored separately
+in task metadata and shown on the dashboard. SQLite persists local task records
+separately from LangGraph checkpoints, while the k3s POC stores both in
+PostgreSQL under the configured schema. Legacy lifecycle values are normalized
+when the task store initializes; task event history remains unchanged. The
+queue claims a task in a transaction before launching its worker.
 In the split deployment it dispatches the workflow process over SSH to devMac.
 Waiting for CI occupies no worker process. A stopped worker is
 reconciled against its checkpoint on the next queue pass; an interrupted coder
 with a dirty worktree remains blocked for inspection. Final PR review is
 dispatched over SSH to the Mac workspace and is bound to the PR head SHA. READY
 tasks are polled until merge; successful post-merge CI is recorded before the
-linked GitHub issue is closed and the task becomes COMPLETED.
+linked GitHub issue is closed and the task becomes DONE.
 
 Agent boundaries are structured: the planner returns a plan with assumptions,
 acceptance criteria, ordered steps, and validation; Codex returns a schema
@@ -65,11 +68,10 @@ branch is copied into each workspace so its `.git` metadata stays inside the
 directory mounted into a Dev Container. Direct prompt
 tasks use the configured target repository and do not publish issue comments.
 
-The workflow requires human review. An approval from the configured repository
-login authorizes merge into the development branch only when it matches the
-independently reviewed head and CI is green. After post-merge CI passes, the
-scheduler opens or reuses a separate development-to-release PR. A human reviews
-and merges that promotion PR.
+The workflow requires human review and merge. The scheduler never merges task
+PRs or opens release-promotion PRs. It records completion after observing the
+human merge, verifying the target branch and issue linkage, and confirming
+post-merge CI is green.
 
 ## Delivery stages
 
@@ -85,6 +87,27 @@ The architecture contains capabilities from two delivery stages:
 
 Hardening may be implemented in the current graph even when it is not part of
 the MVP completion gate.
+
+## Pull-runner migration status
+
+PostgreSQL now has durable `jobs`, `job_attempts`, and `runners` records. Job
+specifications are immutable and reject secret-named configuration fields.
+Claims create a unique attempt and lease transactionally, enforce runner
+capabilities and separate Codex/build capacities, reject stale runners, and
+prevent concurrent jobs for the same task or repository branch. Heartbeats and
+completion are fenced by the attempt ID. Lease expiry marks a job uncertain;
+the store requires proof the old process stopped before requeueing.
+
+`app.runner_daemon` and `app.runner_job_worker` use the PostgreSQL job store
+behind the opt-in `RUNNER_TRANSPORT=postgres_pull` setting; SSH remains the
+default. The scheduler queues implementation and final-review work and
+reconciles attempt results into task state. The worker adapter still invokes
+the existing graph CLI, so the target single-invocation Codex workflow is not
+complete. Do not enable both dispatch paths or switch production to pull mode
+before isolated PostgreSQL and live recovery acceptance tests pass.
+
+Task PRs require human merging. The scheduler observes the merge and reconciles
+successful post-merge CI into the task lifecycle.
 
 ## Planning phase
 
@@ -114,13 +137,30 @@ For each normalized plan step:
    issues that prohibit application tests use `git diff --check` and a changed-
    path scope check without starting the target test suite or Dev Container.
 5. Route validation failures back to the coder while attempts remain.
-6. Run the reviewer after validation succeeds. The reviewer receives the
-   current coder report and orchestrator-captured checkout audit.
+6. In `legacy` mode, run a review for each validated step. In `simplified`
+   mode, skip those repeated reviews and retain the final independent review.
 7. Route blocking review findings back to the coder while attempts remain.
 8. Create a local checkpoint commit after approval.
 
 Later steps must not be implemented early. Step progression happens only after
 approval of the current step.
+
+## Simplified workflow migration
+
+`WORKFLOW_MODE=simplified` consolidates a generated multi-step plan into one
+implementation step. It preserves the union of the planner's requirements,
+acceptance criteria, validation commands, affected areas, and exclusions, then
+runs the existing coder and deterministic validation. Per-step review is
+skipped; the independent final review still gates publication. This reduces a
+multi-step task to one initial coding pass, plus bounded validation or final
+review repair calls, without changing the scheduler or checkpoint contract.
+
+The planner remains a separate read-only Codex invocation in this migration
+slice. The mode defaults to `legacy`; select `simplified` for new tasks after
+reviewing the behavior. The chosen mode is stored in task checkpoints and
+runner job configuration. Checkpoints created before this setting existed
+continue using the legacy route. Existing in-flight workflows are therefore
+not silently migrated.
 
 When a plan lists concrete repository-relative paths, the checkpoint commit
 enforces that path scope. Narrative descriptions are not treated as paths; the
@@ -129,8 +169,11 @@ resume retries the commit node without skipping it or re-running the coder.
 
 ## Retry semantics
 
-`MAX_ATTEMPTS` is a per-step limit shared by validation and review repair loops.
-An attempt is consumed when the coder produces a candidate:
+`MAX_REPAIRS` is the durable task-level ceiling shared by validation, review,
+final integration, and CI code repairs. `MAX_ATTEMPTS` and
+`MAX_FINAL_ATTEMPTS` remain local phase ceilings during migration; neither can
+authorize repairs beyond the shared budget. An implementation attempt is
+consumed when the coder produces a candidate:
 
 ```text
 coder candidate
@@ -138,10 +181,11 @@ coder candidate
 → automated review when validation succeeds
 ```
 
-Infrastructure failures block the workflow without consuming an implementation
-attempt. Examples include unavailable authentication, provider outage, Dev
-Container startup failure, reviewer failure, or a coder timeout before a
-candidate is produced.
+Infrastructure failures block the workflow without consuming the shared repair
+budget. The reservation is refunded when a repair invocation fails before
+producing a workspace candidate. Examples include unavailable authentication,
+provider outage, Dev Container startup failure, reviewer failure, or a coder
+timeout before a candidate is produced.
 
 Target adapters return an explicit `success`, `project_validation_failure`, or
 `environment_failure` result. Process spawning and timeout handling remain in
@@ -320,9 +364,8 @@ repairs remain `BLOCKED` with CI output or review findings attached to task
 metadata. Infrastructure failures also block without consuming an agent repair
 attempt.
 
-The scheduler may merge a task PR only after the configured human reviewer has
-approved its exact current head and all automated gates pass. It never merges a
-release-promotion PR.
+The scheduler never merges task PRs. It marks a task complete only after the
+human merge and successful post-merge CI are observed.
 
 ## Blocked state and resume
 

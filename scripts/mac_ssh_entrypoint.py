@@ -5,13 +5,16 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import select
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+from app.runner_jobs import RunnerJobStore
 
 
 TASK_ID_PATTERN = re.compile(
@@ -26,6 +29,13 @@ def _lock_path(task_id: str) -> Path:
         os.getenv("MAC_RUNNER_LOCK_DIR", "~/.investory-orchestrator/locks")
     ).expanduser()
     return directory / f"{key}.lock"
+
+
+def _job_store() -> RunnerJobStore:
+    runs_dir = Path(
+        os.getenv("MAC_RUNS_DIR", "~/.investory-orchestrator/runs")
+    ).expanduser()
+    return RunnerJobStore(runs_dir / "jobs")
 
 
 def _task_id(value: str) -> str:
@@ -62,14 +72,228 @@ def _ensure_node_on_path(environment: dict[str, str]) -> None:
 
 
 def _probe(task_id: str) -> int:
-    lock_path = _lock_path(_task_id(task_id))
+    task_id = _task_id(task_id)
+    store = _job_store()
+    for path in store.directory.glob("[0-9a-f][0-9a-f]*.json"):
+        job_id = path.stem
+        if len(job_id) != 24:
+            continue
+        status = store.get(job_id, include_result=False)
+        if status.get("task_id") == task_id and status.get("status") in {
+            "submitted", "running",
+        }:
+            return 0
+    # Compatibility check for workers started by the previous SSH protocol.
+    # New workers are represented by durable job records above.
+    lock_path = _lock_path(task_id)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
+        else:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
     return 1
+
+
+def _submit(arguments: list[str]) -> int:
+    if len(arguments) != 2:
+        raise ValueError("submit expects one job id")
+    job_id = arguments[1]
+    RunnerJobStore._validate_id(job_id)
+    try:
+        spec = json.load(sys.stdin)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("submit request must be a JSON object on stdin") from error
+    if not isinstance(spec, dict) or spec.get("job_id") != job_id:
+        raise ValueError("submit request job id does not match the SSH command")
+    task_id = _task_id(str(spec.get("task_id", "")))
+    job_type = spec.get("job_type")
+    if job_type not in {"workflow", "final_review"}:
+        raise ValueError("unsupported runner job type")
+    repository = str(spec.get("repository", ""))
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("invalid repository identity")
+    branch = str(spec.get("branch", ""))
+    if branch and not BRANCH_PATTERN.fullmatch(branch):
+        raise ValueError("invalid branch")
+
+    _ensure_node_on_path(os.environ)
+    root = Path(__file__).resolve().parents[1]
+    runs_dir = Path(
+        os.getenv("MAC_RUNS_DIR", "~/.investory-orchestrator/runs")
+    ).expanduser().resolve()
+    environment = os.environ.copy()
+    environment["RUNS_DIR"] = str(runs_dir)
+    environment["ORCHESTRATOR_RUNNER_RESULT_PATH"] = str(runs_dir / f"{job_id}.result.json")
+    environment["ORCHESTRATOR_BUILD_SHA"] = str(spec.get("expected_build_sha", "unknown"))
+    workspaces_dir = Path(
+        os.getenv("MAC_WORKSPACES_DIR", "~/.investory-orchestrator/task-workspaces")
+    ).expanduser().resolve()
+    environment["WORKSPACES_DIR"] = str(workspaces_dir)
+    if spec.get("base_branch"):
+        environment["BASE_BRANCH"] = str(spec["base_branch"])
+
+    python = os.getenv("MAC_CLI_PYTHON", "python3")
+    if job_type == "workflow":
+        if not isinstance(spec.get("task"), dict):
+            raise ValueError("workflow job requires a task snapshot")
+        command = [
+            python, "-m", "app", "--task-id", task_id,
+            "--runner-worker", "--runner-job-id", job_id,
+        ]
+        issue_number = spec["task"].get("issue_number")
+        if issue_number is not None:
+            if not isinstance(issue_number, int) or isinstance(issue_number, bool):
+                raise ValueError("invalid issue number")
+            command.extend(["--issue", str(issue_number)])
+        if spec.get("resume") is True:
+            command.append("--resume")
+        if spec.get("ci_repair") is True:
+            command.append("--ci-repair")
+    else:
+        request = spec.get("review_request")
+        if not isinstance(request, dict) or request.get("task_id") != task_id:
+            raise ValueError("final review job requires a matching review request")
+        workspace = Path(str(request.get("workspace", ""))).expanduser().resolve()
+        if workspace == workspaces_dir or not workspace.is_relative_to(workspaces_dir):
+            raise ValueError("review workspace is outside MAC_WORKSPACES_DIR")
+        command = [python, "-m", "app.review_worker", "--job-id", job_id]
+
+    store = RunnerJobStore(runs_dir / "jobs")
+    result = store.submit(
+        job_id=job_id,
+        spec=spec,
+        command=command,
+        environment={
+            name: environment[name]
+            for name in (
+                "PATH", "HOME", "RUNS_DIR", "WORKSPACES_DIR", "BASE_BRANCH",
+                "ORCHESTRATOR_RUNNER_RESULT_PATH", "ORCHESTRATOR_BUILD_SHA",
+            )
+            if name in environment
+        },
+        cwd=root,
+    )
+    print(json.dumps(result, separators=(",", ":"), default=str))
+    return 0
+
+
+def _job_status(arguments: list[str]) -> int:
+    if len(arguments) != 2:
+        raise ValueError("status expects one job id")
+    print(json.dumps(
+        _job_store().get(arguments[1]), separators=(",", ":"), default=str
+    ))
+    return 0
+
+
+def _cancel(arguments: list[str]) -> int:
+    if len(arguments) != 2:
+        raise ValueError("cancel expects one job id")
+    print(json.dumps(
+        _job_store().cancel(arguments[1]), separators=(",", ":"), default=str
+    ))
+    return 0
+
+
+def _codex_quota_report(environment: dict[str, str]) -> dict[str, object]:
+    """Read the authenticated Codex account rate-limit snapshot without a model call."""
+    process = subprocess.Popen(
+        ["codex", "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+        env=environment,
+    )
+    try:
+        if process.stdin is None or process.stdout is None:
+            raise RuntimeError("Codex app-server pipes are unavailable")
+
+        def send(message: dict[str, object]) -> None:
+            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
+
+        def response_for(request_id: int, timeout: float) -> dict[str, object]:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select(
+                    [process.stdout], [], [], max(0, deadline - time.monotonic())
+                )
+                if not readable:
+                    break
+                line = process.stdout.readline()
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if message.get("id") == request_id:
+                    if "error" in message:
+                        raise RuntimeError("Codex account rate-limit request failed")
+                    result = message.get("result")
+                    if isinstance(result, dict):
+                        return result
+                    break
+            raise TimeoutError("Codex account rate-limit request timed out")
+
+        send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "investory-orchestrator-quota-probe",
+                    "title": "Investory Orchestrator quota probe",
+                    "version": "1.0",
+                },
+                "capabilities": {},
+            },
+        })
+        response_for(1, 5)
+        send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        send({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "account/rateLimits/read",
+            "params": {},
+        })
+        result = response_for(2, 12)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+    rate_limits = result.get("rateLimits")
+    if not isinstance(rate_limits, dict):
+        raise RuntimeError("Codex returned no account rate-limit snapshot")
+    windows: list[dict[str, object]] = []
+    for name in ("primary", "secondary"):
+        window = rate_limits.get(name)
+        if not isinstance(window, dict) or not isinstance(window.get("usedPercent"), (int, float)):
+            continue
+        remaining = max(0, min(100, 100 - int(window["usedPercent"])))
+        windows.append({
+            "name": name,
+            "remaining_percent": remaining,
+            "resets_at": window.get("resetsAt"),
+        })
+    if not windows:
+        raise RuntimeError("Codex returned no usable account quota windows")
+    return {
+        "status": "available",
+        "remaining_percent": min(int(window["remaining_percent"]) for window in windows),
+        "windows": windows,
+        "observed_at": time.time(),
+    }
 
 
 def _health_report(expected_sha: str) -> dict:
@@ -127,6 +351,15 @@ def _health_report(expected_sha: str) -> dict:
         except (OSError, subprocess.TimeoutExpired):
             checks[name] = False
 
+    try:
+        quota = _codex_quota_report(environment)
+    except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+        quota = {
+            "status": "unavailable",
+            "detail": "Codex quota could not be read; dispatch must pause until it is available.",
+            "observed_at": time.time(),
+        }
+
     workspaces = Path(
         os.getenv("MAC_WORKSPACES_DIR", "~/.investory-orchestrator/task-workspaces")
     ).expanduser()
@@ -150,6 +383,7 @@ def _health_report(expected_sha: str) -> dict:
         "detail": detail,
         "checks": checks,
         "versions": versions,
+        "codex_quota": quota,
         "actual_sha": actual_sha,
         "expected_sha": expected_sha,
     }
@@ -328,13 +562,19 @@ def main() -> int:
         arguments = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
         if len(arguments) == 2 and arguments[0] == "probe":
             return _probe(arguments[1])
+        if arguments and arguments[0] == "submit":
+            return _submit(arguments)
+        if arguments and arguments[0] == "status":
+            return _job_status(arguments)
+        if arguments and arguments[0] == "cancel":
+            return _cancel(arguments)
         if len(arguments) == 2 and arguments[0] == "health":
             return _health(arguments[1])
         if arguments and arguments[0] == "run":
             return _run(arguments)
         if arguments and arguments[0] == "review":
             return _review(arguments)
-        raise ValueError("only health, run, review, and probe requests are accepted")
+        raise ValueError("only health, submit, status, cancel, run, review, and probe requests are accepted")
     except (OSError, RuntimeError, ValueError) as error:
         print(f"Rejected Mac runner request: {error}", file=sys.stderr)
         return 64

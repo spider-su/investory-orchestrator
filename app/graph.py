@@ -43,6 +43,7 @@ from app.side_effects import (
     prepare_push_intent,
 )
 from app.state import WorkflowState
+from app.tasks import TaskStore
 from app.test_runner import (
     is_documentation_only_task,
     run_validation,
@@ -57,6 +58,47 @@ from app.workspace import (
     prepare_workspace,
     push_branch,
 )
+
+
+def _repair_store(state: WorkflowState) -> TaskStore | None:
+    task_id = state.get("task_id", "")
+    if not task_id:
+        return None
+    database = os.getenv("DATABASE_URL") or os.getenv("TASK_DB", "/app/data/tasks.db")
+    return TaskStore(database)
+
+
+def _reserve_repair(state: WorkflowState) -> tuple[bool, str, TaskStore | None]:
+    store = _repair_store(state)
+    if store is None:
+        return True, "", None
+    try:
+        budget = store.reserve_code_repair(
+            state["task_id"],
+            fallback_limit=max(0, int(os.getenv("MAX_REPAIRS", "3"))),
+        )
+    except Exception as error:
+        return False, f"Could not reserve code repair budget: {error}", store
+    if budget is None:
+        task = store.get(state["task_id"])
+        details = (task.metadata.get("repair_budget", {}) if task else {})
+        return (
+            False,
+            "REPAIR_BUDGET_EXHAUSTED: "
+            f"used {details.get('used', 0)} of {details.get('limit', 0)} repairs.",
+            store,
+        )
+    return True, "", store
+
+
+def _refund_repair(store: TaskStore | None, state: WorkflowState) -> str:
+    if store is None:
+        return ""
+    try:
+        store.release_code_repair(state["task_id"])
+    except Exception as error:
+        return f"Could not refund unused repair reservation: {error}"
+    return ""
 
 
 def load_issue(state: WorkflowState) -> dict:
@@ -101,7 +143,6 @@ def planner_node(state: WorkflowState) -> dict:
             "error": message,
         }
 
-    markdown = plan_to_markdown(plan)
     requires_user_input = bool(plan.open_questions)
 
     print(
@@ -114,6 +155,13 @@ def planner_node(state: WorkflowState) -> dict:
             f"{len(plan.open_questions)} open question(s)"
         )
 
+    if state.get("workflow_mode") == "simplified":
+        # Retain the planner's requirements and acceptance criteria, while
+        # making implementation a single Codex coding pass for this task.
+        from app.agents.planner import consolidate_plan
+
+        plan = consolidate_plan(plan)
+    markdown = plan_to_markdown(plan)
     plan_dict = plan.model_dump(mode="json")
     steps = [
         {
@@ -619,6 +667,17 @@ def coder_node(state: WorkflowState) -> dict:
     next_attempt = state["attempt"] + 1
     step = state["steps"][state["current_step"]]
     coder_info = coder_identity()
+    repair_store = None
+
+    if next_attempt > 1:
+        reserved, reason, repair_store = _reserve_repair(state)
+        if not reserved:
+            return {
+                "workflow_status": "blocked",
+                "blocked_reason": reason,
+                "blocked_stage": "repair_budget",
+                "error": reason,
+            }
 
     print(
         f"Running coder attempt "
@@ -654,6 +713,14 @@ def coder_node(state: WorkflowState) -> dict:
         )
         workspace = Path(state["workspace"])
         candidate_produced = workspace_has_changes(workspace)
+
+        refund_error = (
+            _refund_repair(repair_store, state)
+            if next_attempt > 1 and not candidate_produced
+            else ""
+        )
+        if refund_error:
+            message = f"{message}\n\n{refund_error}"
 
         if candidate_produced:
             try:
@@ -703,9 +770,16 @@ def coder_node(state: WorkflowState) -> dict:
             needsHumanInput=False,
         )
     if coder_report.needs_human_input:
+        refund_error = (
+            _refund_repair(repair_store, state)
+            if next_attempt > 1
+            else ""
+        )
         reason = "Coder needs human input: " + "; ".join(
             coder_report.remaining_problems
         )
+        if refund_error:
+            reason = f"{reason}\n\n{refund_error}"
         return {
             "workflow_status": "blocked",
             "coder_summary": coder_report.summary,
@@ -806,6 +880,8 @@ def run_validation_node(state: WorkflowState) -> dict:
 
 def route_after_validation(state: WorkflowState) -> str:
     if state["validation_status"] == "validation_success":
+        if state.get("workflow_mode", "legacy") == "simplified":
+            return "prepare_checkpoint"
         return "reviewer"
 
     if state["validation_status"] == "environment_failure":
@@ -1486,6 +1562,14 @@ def route_after_final_validation(state: WorkflowState) -> str:
 def final_integration_coder_node(state: WorkflowState) -> dict:
     next_attempt = state["final_attempt"] + 1
     max_attempts = state["max_final_attempts"]
+    reserved, reason, repair_store = _reserve_repair(state)
+    if not reserved:
+        return {
+            "workflow_status": "blocked",
+            "blocked_reason": reason,
+            "blocked_stage": "repair_budget",
+            "error": reason,
+        }
 
     print(
         "Running whole-plan integration repair "
@@ -1545,8 +1629,16 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
             "last_failed_final_patch_path",
             "",
         )
+        candidate_produced = workspace_has_changes(workspace)
+        refund_error = (
+            _refund_repair(repair_store, state)
+            if not candidate_produced
+            else ""
+        )
+        if refund_error:
+            message = f"{message}\n\n{refund_error}"
 
-        if workspace_has_changes(workspace):
+        if candidate_produced:
             try:
                 artifact = archive_and_reset_failed_attempt(
                     workspace=workspace,
@@ -1585,9 +1677,12 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
             needsHumanInput=False,
         )
     if coder_report.needs_human_input:
+        refund_error = _refund_repair(repair_store, state)
         reason = "Coder needs human input: " + "; ".join(
             coder_report.remaining_problems
         )
+        if refund_error:
+            reason = f"{reason}\n\n{refund_error}"
         return {
             "workflow_status": "blocked",
             "coder_error": "",
@@ -2499,6 +2594,7 @@ def build_graph():
         route_after_validation,
         {
             "reviewer": "reviewer",
+            "prepare_checkpoint": "prepare_checkpoint",
             "isolate_validation_failure": (
                 "isolate_validation_failure"
             ),

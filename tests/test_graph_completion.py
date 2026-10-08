@@ -110,6 +110,28 @@ class FakeGitHubClient:
 
 
 class GraphCompletionTests(unittest.TestCase):
+    def test_coder_is_not_started_when_shared_repair_budget_is_exhausted(self) -> None:
+        state = {
+            "issue_number": 42,
+            "issue_title": "Attempt accounting",
+            "workspace": "D:/projects/investory-orchestrator",
+            "steps": [{"id": "step-01", "title": "Implement"}],
+            "current_step": 0,
+            "attempt": 1,
+            "max_attempts": 3,
+            "coder_error": "",
+        }
+        with patch(
+            "app.graph._reserve_repair",
+            return_value=(False, "REPAIR_BUDGET_EXHAUSTED", None),
+        ):
+            with patch("app.graph.run_coder") as coder_mock:
+                result = coder_node(state)
+
+        coder_mock.assert_not_called()
+        self.assertEqual(result["blocked_stage"], "repair_budget")
+        self.assertIn("REPAIR_BUDGET_EXHAUSTED", result["blocked_reason"])
+
     def test_finalization_accepts_reviewed_no_change_outcome(self) -> None:
         state = build_state()
         state.update(
@@ -269,6 +291,32 @@ class GraphCompletionTests(unittest.TestCase):
 
         self.assertEqual(result["attempt"], 1)
         self.assertEqual(result["attempt_artifacts"], [])
+
+    def test_repair_reservation_is_refunded_when_codex_fails_without_candidate(self) -> None:
+        state = {
+            "task_id": "task-1",
+            "issue_number": 42,
+            "issue_title": "Attempt accounting",
+            "issue_body": "",
+            "workspace": "D:/projects/investory-orchestrator",
+            "steps": [{"id": "step-01", "title": "Implement"}],
+            "current_step": 0,
+            "attempt": 1,
+            "max_attempts": 3,
+            "test_output": "failed validation",
+            "review": {},
+            "last_failed_patch_path": "",
+            "attempt_artifacts": [],
+        }
+        store = object()
+        with patch("app.graph._reserve_repair", return_value=(True, "", store)):
+            with patch("app.graph.run_coder", side_effect=CoderError("auth unavailable")):
+                with patch("app.graph.workspace_has_changes", return_value=False):
+                    with patch("app.graph._refund_repair", return_value="") as refund:
+                        result = coder_node(state)
+
+        refund.assert_called_once_with(store, state)
+        self.assertEqual(result["attempt"], 1)
 
     def test_validation_environment_failure_blocks_without_retry(self) -> None:
         for exit_code, output in (
