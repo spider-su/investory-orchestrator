@@ -146,7 +146,7 @@ def run_daemon(*, once: bool = False) -> None:
     )).expanduser()
     version = _version()
     last_heartbeat = 0.0
-    last_health_check = 0.0
+    last_health_check: float | None = None
     _STOP = False
     store.register_runner(
         runner_id, capabilities=capabilities,
@@ -177,7 +177,10 @@ def run_daemon(*, once: bool = False) -> None:
                     )
                 last_heartbeat = now
 
-            if now - last_health_check >= health_check_seconds:
+            if (
+                last_health_check is None
+                or now - last_health_check >= health_check_seconds
+            ):
                 store.set_service_status(
                     "codex_quota", "unknown",
                     "Checking Codex authentication and quota on the pull runner.",

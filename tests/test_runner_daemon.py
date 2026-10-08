@@ -43,6 +43,7 @@ class RunnerDaemonTests(unittest.TestCase):
                 "RUNNER_WORKSPACES_DIR": str(root / "workspaces"),
                 "RUNNER_RUNS_DIR": str(root / "runs"),
                 "RUNNER_RESULT_DIR": str(root / "results"),
+                "RUNNER_HEALTH_CHECK_SECONDS": "3600",
             }
             start_calls: list[str] = []
 
@@ -61,8 +62,12 @@ class RunnerDaemonTests(unittest.TestCase):
                         "app.runner_daemon._refresh_codex_health",
                         side_effect=healthy_quota_health,
                     ):
-                        run_daemon(once=True)
-                        run_daemon(once=True)
+                        # A fresh Linux runner can have less uptime than the
+                        # configured health-check interval. It must still run
+                        # the initial quota/auth check before trying to claim.
+                        with patch("app.runner_daemon.time.monotonic", return_value=10.0):
+                            run_daemon(once=True)
+                            run_daemon(once=True)
 
             saved = store.get_job(job["job_id"])
             self.assertEqual(saved["status"], JobStatus.RUNNING.value)
