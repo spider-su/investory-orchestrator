@@ -11,13 +11,18 @@ from app.tasks import TaskStatus, TaskStore
 
 
 class FakeGraph:
-    def __init__(self, snapshot_values: dict | None = None) -> None:
+    def __init__(
+        self,
+        snapshot_values: dict | None = None,
+        snapshot_next: tuple[str, ...] = (),
+    ) -> None:
         self.snapshot_values = snapshot_values or {}
+        self.snapshot_next = snapshot_next
         self.invocations: list[tuple[object, dict]] = []
         self.updates: list[tuple[dict, dict, str]] = []
 
     def get_state(self, config: dict):
-        return SimpleNamespace(values=self.snapshot_values)
+        return SimpleNamespace(values=self.snapshot_values, next=self.snapshot_next)
 
     def update_state(
         self,
@@ -120,6 +125,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(graph.updates[0][2], "prepare_current_step")
         self.assertNotIn("attempt", graph.updates[0][1])
         self.assertEqual(saved_state["attempt"], 2)
+
+    def test_resume_with_pending_coder_node_checks_workspace_before_invoking(self) -> None:
+        saved_state = {
+            "workflow_status": "reviewing",
+            "workspace": "/path/that/does/not/exist",
+            "max_attempts": 3,
+            "max_final_attempts": 3,
+            "attempt": 1,
+            "final_attempt": 0,
+        }
+        graph = FakeGraph(saved_state, snapshot_next=("coder",))
+
+        run_cli(
+            build_graph=lambda: graph,
+            resolve_resume_from=Mock(),
+            reload_issue_for_planning=Mock(),
+            argv=["--issue", "42", "--resume"],
+        )
+
+        self.assertEqual(len(graph.invocations), 1)
 
     def test_build_initial_state_has_remote_operation_defaults(self) -> None:
         state = build_initial_state(7)
