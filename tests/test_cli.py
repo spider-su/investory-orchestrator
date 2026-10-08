@@ -127,6 +127,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(state["side_effect_intent"], {})
         self.assertEqual(state["side_effect_history"], [])
         self.assertEqual(state["workflow_status"], "new")
+        self.assertIn(state["workflow_mode"], {"legacy", "simplified"})
+
+    def test_build_initial_state_rejects_unknown_workflow_mode(self) -> None:
+        with patch.dict("os.environ", {"WORKFLOW_MODE": "unknown"}):
+            with self.assertRaisesRegex(ValueError, "WORKFLOW_MODE"):
+                build_initial_state(7)
 
     def test_ci_repair_routes_saved_feedback_to_final_integration_coder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

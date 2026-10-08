@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,6 +38,40 @@ class TaskStoreTests(unittest.TestCase):
         self.assertIsNotNone(saved)
         self.assertEqual(saved.status, TaskStatus.PLANNING)
         self.assertEqual(saved.workspace, "/tmp/task-42")
+
+    def test_lifecycle_migration_maps_legacy_states_and_preserves_phase(self) -> None:
+        task = self.store.create(title="Legacy running task")
+        with self.store._connection() as connection:
+            connection.execute(
+                "UPDATE tasks SET status='VALIDATING', metadata='{}' WHERE task_id=?",
+                (task.task_id,),
+            )
+
+        migrated = TaskStore(self.store.path).get(task.task_id)
+
+        self.assertEqual(migrated.status, TaskStatus.RUNNING)
+        self.assertEqual(migrated.metadata["phase"], "validating")
+        self.assertEqual({status.value for status in TaskStatus}, {
+            "QUEUED", "RUNNING", "WAITING_CI", "READY", "DONE", "BLOCKED"
+        })
+
+    def test_legacy_completed_and_failed_states_map_to_done_and_blocked(self) -> None:
+        completed = self.store.create(title="Legacy done")
+        failed = self.store.create(title="Legacy failed")
+        with self.store._connection() as connection:
+            connection.execute(
+                "UPDATE tasks SET status='COMPLETED' WHERE task_id=?",
+                (completed.task_id,),
+            )
+            connection.execute(
+                "UPDATE tasks SET status='FAILED' WHERE task_id=?",
+                (failed.task_id,),
+            )
+
+        migrated_store = TaskStore(self.store.path)
+
+        self.assertEqual(migrated_store.get(completed.task_id).status, TaskStatus.DONE)
+        self.assertEqual(migrated_store.get(failed.task_id).status, TaskStatus.BLOCKED)
 
     def test_issue_numbers_are_unique_per_repository(self) -> None:
         first = self.store.create(
@@ -93,6 +128,49 @@ class TaskStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "QUEUED -> READY"):
             self.store.transition(task.task_id, TaskStatus.READY)
+
+    def test_repair_budget_is_persisted_and_stops_at_limit(self) -> None:
+        task = self.store.create(title="Bounded repair")
+
+        first = self.store.reserve_code_repair(task.task_id, fallback_limit=2)
+        second = self.store.reserve_code_repair(task.task_id, fallback_limit=9)
+        exhausted = self.store.reserve_code_repair(task.task_id, fallback_limit=9)
+
+        self.assertEqual(first, {"limit": 2, "used": 1})
+        self.assertEqual(second, {"limit": 2, "used": 2})
+        self.assertIsNone(exhausted)
+        saved = TaskStore(self.store.path).get(task.task_id)
+        self.assertEqual(saved.metadata["repair_budget"], {"limit": 2, "used": 2})
+        events = self.store.list_activity(task.task_id)
+        self.assertEqual(
+            [item["event_type"] for item in events].count("repair_reserved"), 2
+        )
+
+    def test_concurrent_repair_reservations_cannot_exceed_budget(self) -> None:
+        task = self.store.create(title="Concurrent repairs")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            reservations = list(executor.map(
+                lambda _: self.store.reserve_code_repair(
+                    task.task_id, fallback_limit=3
+                ),
+                range(8),
+            ))
+
+        self.assertEqual(sum(item is not None for item in reservations), 3)
+        self.assertEqual(
+            self.store.get(task.task_id).metadata["repair_budget"],
+            {"limit": 3, "used": 3},
+        )
+
+    def test_failed_repair_start_can_refund_reservation(self) -> None:
+        task = self.store.create(title="Refund repair")
+        self.store.reserve_code_repair(task.task_id, fallback_limit=1)
+
+        refunded = self.store.release_code_repair(task.task_id)
+        available = self.store.reserve_code_repair(task.task_id, fallback_limit=5)
+
+        self.assertEqual(refunded, {"limit": 1, "used": 0})
+        self.assertEqual(available, {"limit": 1, "used": 1})
 
     def test_merged_completion_requires_post_merge_ci(self) -> None:
         task = self.store.create(title="Run task")
@@ -186,7 +264,7 @@ class TaskStoreTests(unittest.TestCase):
     def test_checks_expected_status_atomically(self) -> None:
         task = self.store.create(title="Run task")
 
-        with self.assertRaisesRegex(RuntimeError, "expected IMPLEMENTING"):
+        with self.assertRaisesRegex(RuntimeError, "expected RUNNING"):
             self.store.transition(
                 task.task_id,
                 TaskStatus.PLANNING,

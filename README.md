@@ -7,16 +7,16 @@ deterministic validation, isolated Git checkouts, GitHub Actions, repair loops,
 and a durable task queue backed by SQLite for local use or PostgreSQL for
 deployment.
 
-An authorized human review remains the merge authorization. After that approval,
-the scheduler merges the reviewed task PR into the configured development branch
-and opens a separate development-to-release PR for manual release review.
+The scheduler prepares a reviewed PR and notifies you. You review and merge it;
+the scheduler records completion after it observes the merge and successful
+post-merge CI.
 
 ## Current status
 
 The `ready_to_develop` intake, k3s scheduler, dashboard, and Mac SSH worker are
-deployed. Issue #104 reached COMPLETED with PR #105 and green post-merge CI
-before approval-triggered merging was added. The new approved-merge and
-development-to-release promotion path still needs its first live run.
+deployed. Issue #104 reached COMPLETED with PR #105 and green post-merge CI.
+The current scheduler policy keeps merge manual and records completion after
+observing a human merge and successful post-merge CI.
 
 [`ROADMAP.md`](ROADMAP.md) is the authoritative source for implementation,
 verification, and production-readiness status.
@@ -38,9 +38,10 @@ GitHub issue or direct task prompt
 → READY or BLOCKED
 ```
 
-The current executable workflow also includes several operational-hardening
-features, such as isolated retries, whole-plan review, integration repair, and
-final history rewriting. These features are described in
+The executable workflow currently defaults to the legacy multi-step graph.
+An opt-in `WORKFLOW_MODE=simplified` consolidates the planned steps into one
+implementation pass and removes per-step reviews while preserving final
+validation and independent review. Migration details are described in
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Quick start
@@ -86,13 +87,22 @@ repair loops use `MAX_ATTEMPTS` and `MAX_FINAL_ATTEMPTS`. Mac-side final-review
 attempts and timeout use `MAX_FINAL_REVIEW_ATTEMPTS` and
 `MAC_REVIEW_TIMEOUT_SECONDS`.
 
+In the Mac SSH deployment, the scheduler reads Codex account quota during the
+runner health check. It limits dispatch to one active task at 10% remaining and
+pauses new work at 5%; thresholds are configurable with
+`CODEX_QUOTA_THROTTLE_REMAINING_PERCENT` and
+`CODEX_QUOTA_PAUSE_REMAINING_PERCENT`.
+
+The PostgreSQL pull-runner path is integrated and opt-in with
+`RUNNER_TRANSPORT=postgres_pull`; SSH remains the default. Do not switch the
+deployed scheduler to pull mode until its live acceptance scenarios pass; see
+[`docs/simplification-audit.md`](docs/simplification-audit.md).
+
 With `MAC_SSH_TARGET` configured, whole-plan final review runs on the Mac
-runner against the exact open PR head. The scheduler polls READY tasks for an
-approval from the configured repository login on the exact reviewed head. With
-green CI it merges the task PR into the configured development branch, then
-records completion only after CI on the merge commit succeeds and closes the
-linked issue. It opens or reuses a separate development-to-release PR for manual
-review. For a manual merge made before scheduler tracking,
+runner against the exact open PR head. The scheduler polls READY tasks and
+records completion only after it observes that you merged the task PR and CI on
+the merge commit succeeds; it then closes the linked issue. For a manual merge
+made before scheduler tracking,
 `--reconcile-merged-pr '<task-id>'` verifies the merge, target branch, linked
 issue, and post-merge CI before recording it.
 
@@ -110,14 +120,13 @@ READY when those identities match or are missing.
   after the task is durably queued, the label is removed and a stable status
   comment is posted. The dashboard tracks progress, and a GitHub mention is
   posted when the PR is ready for human review.
-- Live GitHub, Dev Container, coder, and GitHub Actions end-to-end scenarios
-  have not yet been run for the new queue lifecycle.
+- Live pull-runner GitHub, Dev Container, coder, restart, and GitHub Actions
+  acceptance scenarios have not yet been run.
 - Interrupted coder work with an uncommitted diff is preserved and blocked for
   inspection instead of being reset automatically.
 - Existing graph recovery still needs broader crash-boundary testing around
   local commits and final history rewriting.
-- Human approval remains required. Only the configured reviewer can authorize
-  the task PR merge; release-promotion PRs are never merged automatically.
+- Human review and merge remain required. The scheduler never merges task PRs.
 - Codex execution depends on available authentication and usage quota.
 
 ## Documentation

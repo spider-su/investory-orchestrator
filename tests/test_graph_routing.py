@@ -71,9 +71,15 @@ class GraphRoutingTests(unittest.TestCase):
     def test_route_after_validation(self) -> None:
         self.assertEqual(
             route_after_validation(
-                {"validation_status": "validation_success"}
+                {"validation_status": "validation_success", "workflow_mode": "legacy"}
             ),
             "reviewer",
+        )
+        self.assertEqual(
+            route_after_validation(
+                {"validation_status": "validation_success", "workflow_mode": "simplified"}
+            ),
+            "prepare_checkpoint",
         )
         self.assertEqual(
             route_after_validation(

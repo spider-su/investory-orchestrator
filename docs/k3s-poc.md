@@ -172,7 +172,6 @@ Mac SSH dispatch path with restart-aware task locks, terminal issue mentions,
 and k3s manifests.
 
 The remaining live acceptance is to label an issue `ready_to_develop` and
-watch it through remote execution, CI, final review, an approving review,
-automated merge into `develop`, post-merge completion, and creation of a manual
-`develop`-to-`main` promotion PR. GitHub Projects/priority synchronization
-remains optional and is not part of label-based intake.
+watch it through remote execution, CI, final review, human review and merge,
+post-merge completion, and issue closure. GitHub Projects/priority
+synchronization remains optional and is not part of label-based intake.

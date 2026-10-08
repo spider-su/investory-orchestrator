@@ -31,14 +31,16 @@ GITHUB_REPOSITORY=spider-su/investory
 WORKSPACES_DIR=/app/workspaces
 TASK_DB=/app/data/tasks.db
 BASE_BRANCH=main
-RELEASE_BRANCH=main
-APPROVED_PR_MERGE_METHOD=squash
 MAX_ATTEMPTS=3
+MAX_REPAIRS=3
+WORKFLOW_MODE=legacy
 MAX_FINAL_ATTEMPTS=3
 CI_RETRY_ATTEMPTS=3
 MAX_ACTIVE_TASKS=3
 MAX_CODEX_PROCESSES=2
 MAX_BUILDS=1
+CODEX_QUOTA_THROTTLE_REMAINING_PERCENT=10
+CODEX_QUOTA_PAUSE_REMAINING_PERCENT=5
 QUEUE_POLL_SECONDS=30
 READY_ISSUE_LABEL=ready_to_develop
 PUBLISH_PLAN_COMMENT=true
@@ -50,6 +52,21 @@ CODER_MODEL=
 REVIEWER_MODEL=
 ```
 
+`WORKFLOW_MODE` accepts `legacy` or `simplified`. Keep `legacy` for saved
+workflows. `simplified` consolidates new tasks into one implementation step
+and keeps the final independent review gate; it is currently opt-in while the
+new route is validated.
+
+`MAX_REPAIRS` is the task-wide limit for actual code repair invocations across
+local validation/review and CI/final-review repair. The limit and usage are
+persisted in task metadata; infrastructure failures that produce no candidate
+refund the reservation. CI polling and runner health retries do not consume it.
+
+Task status reports one of six lifecycle states. The dashboard shows the
+separate execution phase (preparing, implementing, validating, reviewing,
+repairing, or publishing) so the lifecycle does not need a separate status for
+each workflow node.
+
 The scheduler polls enabled repositories at each repository's configured
 `poll_interval_seconds` (minimum 30 seconds). Before task creation, it checks
 the issue contract in [`issue-contract.md`](issue-contract.md). An invalid
@@ -58,11 +75,8 @@ workspace, or Codex invocation is created. A valid issue is persisted, then
 receives a stable status comment and has its label removed. The dashboard shows
 task progress and Mac runner/queue health. Once CI and independent final review
 pass, the draft PR is marked ready for review and the configured GitHub login
-is mentioned. When configured, an approving review from that login authorizes
-the scheduler to merge the exact reviewed head into the configured development
-branch, provided head CI remains green. After successful post-merge CI, the
-scheduler records completion and opens or reuses a development-to-release PR.
-That release PR is reviewed and merged manually.
+is mentioned. You review and merge the PR. After successful post-merge CI, the
+scheduler records completion and closes the linked issue.
 
 Planner, coder, and reviewer all run as separate local Codex CLI invocations.
 They authenticate through the mounted Codex home directory; they do not use
@@ -101,13 +115,20 @@ supervised runs; omit it for continuous polling.
 In the k3s/Mac deployment, scheduler health probes the Mac over SSH every
 `RUNNER_HEALTH_CHECK_SECONDS` (default 60). The probe checks runner tools and
 authentication, writable workspaces, a clean checkout, and that the runner
-checkout matches the scheduler image revision. Dispatch pauses while the
-runner is unavailable; inspect the dashboard's **Runner and queue** card,
-repair connectivity/authentication, and deploy matching code on the Mac.
+checkout matches the scheduler image revision. It also reads Codex's primary
+and secondary account rate-limit windows through the local Codex app-server,
+without making a model call. The dashboard's **Runner and queue** card shows
+the quota state. At 10% remaining, new work is limited to one active task; at
+5% or less, new dispatch pauses. If the quota snapshot cannot be read, dispatch
+pauses until a fresh snapshot is available.
 
 Quota or authentication failures pause new Codex dispatch globally instead of
-letting each issue fail in turn. After resolving the cause, clear that pause
-with `python -m app --resume-queue`.
+letting each issue fail in turn. A prior quota-triggered pause clears when a
+fresh quota snapshot confirms usage is above the pause threshold. Authentication
+only pauses still require the login to be repaired, then cleared with
+`python -m app --resume-queue`. Configure `CODEX_QUOTA_THROTTLE_REMAINING_PERCENT`
+and `CODEX_QUOTA_PAUSE_REMAINING_PERCENT` to tune the 10% throttle and 5% pause
+defaults; the pause threshold must be lower than the throttle threshold.
 
 The scheduler records worker lease owner, PID, start time, and heartbeats in
 task metadata. SSH keepalives and the Mac-side task lock allow the scheduler to
@@ -383,9 +404,9 @@ The orchestrator pushes `agent/issue-<number>`, reuses an existing open PR for
 that branch when present, and otherwise creates a draft PR. Completion is
 recorded only after the PR operation succeeds.
 
-Task PR merges are automated only after explicit approval from the configured
-GitHub login, with current-head, CI, and independent-review checks. Release PRs
-remain manual and target the configured release branch (default `main`).
+Task PRs are prepared for human review. The scheduler never merges them. After
+you merge a PR, it verifies the merge target, issue linkage, and post-merge CI
+before recording task completion and closing the linked issue.
 
 ## Retention and cleanup
 
@@ -393,3 +414,76 @@ Blocked workspaces are intentionally preserved for inspection and resume.
 Explicit workspace, checkpoint, run-artifact, and abandoned-issue retention
 policies are still planned. Do not delete a blocked workspace until its
 checkpoint is no longer needed.
+
+## PostgreSQL pull-runner migration (opt-in)
+
+`RUNNER_TRANSPORT=postgres_pull` opts the scheduler into PostgreSQL job
+dispatch. The default remains `ssh`. In pull mode, the scheduler stores an
+immutable implementation or review job before returning to its polling loop;
+the Mac daemon claims jobs and reports attempt-fenced results. The scheduler
+maps job results back to task state and waits for final review asynchronously.
+An online runner with `codex`, `git`, `build`, and `review` capabilities plus a
+fresh Codex quota report is required before dispatch.
+
+Jobs use renewable leases; an expired lease becomes `uncertain` and is never
+requeued automatically. An operator must prove that the previous process
+stopped before invoking the guarded requeue operation. Claims reject stale
+runners and serialize writes to the same repository branch.
+
+Pull transport remains opt-in until it passes the direct-prompt, GitHub issue,
+CI repair, scheduler restart, runner restart, and live deployment acceptance
+scenarios below. Keep one dispatcher active at a time. Do not switch the
+deployed scheduler to pull mode before the Mac LaunchAgent has a matching code
+checkout, database access, and verified quota health.
+
+To prepare a devMac LaunchAgent after that migration is approved:
+
+1. Check out the same reviewed code revision as the scheduler and install its
+   Python dependencies. The runner uses the same PostgreSQL schema as the
+   scheduler and needs network access to that database.
+2. Create `~/.config/investory-orchestrator/runner.env` with `DATABASE_URL`,
+   `RUNNER_WORKSPACES_DIR`, `RUNNER_RUNS_DIR`, `RUNNER_LOG_DIR`, and
+   `RUNNER_RESULT_DIR`. Keep credentials in this local file, set mode `0600`,
+   and never put them in a job specification.
+3. Copy
+   `scripts/com.spider-su.investory-orchestrator.runner.plist.example` to
+   `~/Library/LaunchAgents/com.spider-su.investory-orchestrator.runner.plist`,
+   replace `YOUR_USER` and the repository path, then validate with
+   `plutil -lint`.
+4. After pull dispatch is enabled and approved, load it with
+   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.spider-su.investory-orchestrator.runner.plist`.
+   Inspect logs and runner heartbeat before accepting work. Unload it with
+   `launchctl bootout gui/$(id -u)/com.spider-su.investory-orchestrator.runner`.
+
+The pull worker still invokes the existing task CLI and the existing task-state
+model remains in place. Pull transport is available for acceptance testing but
+is not the deployed default.
+
+### PostgreSQL integration tests on the dev database
+
+The Investory development PostgreSQL server at `192.168.1.60` is reserved for
+development and isolated integration tests. It is not production and must never
+be used for production data or production migrations. Connection settings come
+from the development-only JDBC stanza in
+`/Users/alex/projects/investory/app/src/main/resources/application-local.yml`;
+do not copy credentials into this repository or print them in logs. The active
+`local` profile may point to another database, so select the `.60` stanza
+explicitly and verify the JDBC target before creating objects.
+
+The pull-runner PostgreSQL test schema is
+`orchestrator_test_20261008`. It is separate from Investory's `investory`
+application schema. The integration test resets only Orchestrator tables in
+that schema before and after running; do not place unrelated objects there.
+Build a local `TEST_POSTGRES_URL` like
+`postgresql://USER:PASSWORD@192.168.1.60:5432/inventory?client_encoding=UTF8`
+from the `.60` JDBC settings in the local shell, set
+`client_encoding=UTF8` in the URL (the development database uses `SQL_ASCII`),
+set `TEST_POSTGRES_SCHEMA=orchestrator_test_20261008`, then run:
+
+```bash
+python -m unittest tests.test_runner_job_store -v
+```
+
+Keep the `TEST_POSTGRES_URL` value local and out of `.env.example`, commits,
+command transcripts, and task specifications. CI leaves this integration test
+skipped unless both test variables are explicitly configured.

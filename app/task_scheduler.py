@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from app.agents.reviewer import (
     review_implementation,
 )
 from app.issue_validation import validate_issue_contract
-from app.tasks import TaskStatus, TaskStore
+from app.tasks import JobKind, JobStatus, TaskPhase, TaskStatus, TaskStore
 
 
 _last_repository_poll: dict[str, float] = {}
@@ -48,6 +49,7 @@ def _track_task_state(
     store: TaskStore,
     task_id: str,
     status: TaskStatus,
+    phase: str | None = None,
     **updates: Any,
 ) -> None:
     task = store.get(task_id)
@@ -59,6 +61,10 @@ def _track_task_state(
         if "blocked_stage" in metadata:
             metadata.pop("blocked_stage", None)
             updates["metadata"] = metadata
+    if phase in {item.value for item in TaskPhase}:
+        metadata = dict(updates.get("metadata", task.metadata))
+        metadata["phase"] = phase
+        updates["metadata"] = metadata
     for counter in ("implementation_attempts", "validation_attempts", "ci_attempts"):
         if counter in updates:
             updates[counter] = max(getattr(task, counter), updates[counter])
@@ -110,7 +116,6 @@ def _sync_task_result(
                     "issue_closed": False,
                     "base_branch": task.metadata.get("base_branch", "develop"),
                 },
-                "release_promotion": {"status": "not_required"},
             }
             _track_task_state(
                 store,
@@ -265,10 +270,7 @@ def _print_task(task: Any) -> None:
             print("Remaining risks:")
             for problem in remaining:
                 print(f"- {problem}")
-        print(
-            "Task completed after authorized merge and successful post-merge CI. "
-            "Review the release-promotion PR separately."
-        )
+        print("Task completed after human merge and successful post-merge CI.")
     elif task.status == TaskStatus.BLOCKED:
         print(f"Blocked: {task.blocked_reason}")
         details = task.metadata.get("ci_details", [])
@@ -342,9 +344,43 @@ def _refresh_runner_health(store: TaskStore, *, force: bool = False) -> None:
     if not force and now - _last_runner_health_check < period:
         return
     _last_runner_health_check = now
+    if os.getenv("RUNNER_TRANSPORT", "ssh").strip().casefold() == "postgres_pull":
+        epoch = time.time()
+        stale_after = max(180, int(os.getenv("RUNNER_JOB_LEASE_SECONDS", "90")) * 3)
+        required = {"codex", "git", "build", "review"}
+        runners = [
+            runner for runner in store.list_runners()
+            if runner.get("status") == "online"
+            and epoch - float(runner.get("last_heartbeat_at") or 0) <= stale_after
+            and required.issubset(set(runner.get("capabilities") or []))
+        ]
+        ready = bool(runners)
+        store.set_service_status(
+            "runner", "ready" if ready else "unavailable",
+            "PostgreSQL pull runner is online."
+            if ready else "No fresh online runner has codex, git, build, and review capabilities.",
+            {"mode": "postgres_pull", "runners": [
+                {"runner_id": item["runner_id"], "version": item.get("version", ""),
+                 "last_heartbeat_at": item.get("last_heartbeat_at")}
+                for item in runners
+            ]},
+        )
+        quota = store.get_service_status("codex_quota")
+        if not quota or epoch - float(quota.get("updated_at") or 0) > stale_after:
+            store.set_service_status(
+                "codex_quota", "unknown",
+                "Codex quota health is missing or stale; pull-runner dispatch is paused.",
+                {"mode": "postgres_pull", "status": "stale"},
+            )
+        return
     if not _ssh_target():
         store.set_service_status(
             "runner", "ready", "Local worker mode; remote Mac health check is disabled.",
+            {"mode": "local"},
+        )
+        store.set_service_status(
+            "codex_quota", "unmonitored",
+            "Quota monitoring is enabled for the remote Mac runner only.",
             {"mode": "local"},
         )
         return
@@ -366,6 +402,7 @@ def _refresh_runner_health(store: TaskStore, *, force: bool = False) -> None:
             report.get("detail", "Mac runner health checks failed."),
             report,
         )
+        _record_codex_quota_status(store, report.get("codex_quota"))
         _log_event(
             "runner_health", node="scheduler",
             status="ready" if ready else "unavailable",
@@ -376,26 +413,87 @@ def _refresh_runner_health(store: TaskStore, *, force: bool = False) -> None:
             "runner", "unavailable", f"Mac health probe failed: {error}",
             {"mode": "mac_ssh"},
         )
+        _record_codex_quota_status(store, None, error=str(error))
         _log_event("runner_health", node="scheduler", status="unavailable", error=str(error))
+
+
+def _quota_thresholds() -> tuple[int, int]:
+    throttle = int(os.getenv("CODEX_QUOTA_THROTTLE_REMAINING_PERCENT", "10"))
+    pause = int(os.getenv("CODEX_QUOTA_PAUSE_REMAINING_PERCENT", "5"))
+    if not 0 <= pause < throttle <= 100:
+        raise ValueError("Codex quota thresholds must satisfy 0 <= pause < throttle <= 100")
+    return throttle, pause
+
+
+def _record_codex_quota_status(
+    store: TaskStore,
+    quota: Any,
+    *,
+    error: str = "",
+) -> None:
+    try:
+        throttle, pause = _quota_thresholds()
+    except ValueError as threshold_error:
+        store.set_service_status(
+            "codex_quota", "unknown", str(threshold_error), {"status": "invalid_config"},
+        )
+        return
+    if not isinstance(quota, dict) or quota.get("status") != "available":
+        detail = (
+            str(quota.get("detail") or "Codex quota is unavailable; dispatch is paused.")
+            if isinstance(quota, dict)
+            else "Codex quota is unavailable; dispatch is paused."
+        )
+        metadata = {"status": "unavailable", "error": error}
+        store.set_service_status("codex_quota", "unknown", detail, metadata)
+        return
+    remaining = quota.get("remaining_percent")
+    if not isinstance(remaining, (int, float)):
+        store.set_service_status(
+            "codex_quota", "unknown", "Codex quota snapshot has no remaining percentage.", quota,
+        )
+        return
+    remaining = max(0, min(100, int(remaining)))
+    metadata = {
+        **quota,
+        "throttle_remaining_percent": throttle,
+        "pause_remaining_percent": pause,
+    }
+    if remaining <= pause:
+        status = "paused"
+        detail = (
+            f"Codex quota is {remaining}% remaining (pause at {pause}%); "
+            "new task dispatch is paused."
+        )
+    elif remaining <= throttle:
+        status = "throttled"
+        detail = (
+            f"Codex quota is {remaining}% remaining; dispatch is limited to one active task "
+            f"at {throttle}% or less."
+        )
+    else:
+        status = "healthy"
+        detail = f"Codex quota is {remaining}% remaining; normal dispatch is enabled."
+    store.set_service_status("codex_quota", status, detail, metadata)
 
 
 def _codex_outage_category(reason: str) -> str | None:
     normalized = reason.casefold()
+    quota_patterns = (
+        "insufficient_quota", "usage limit", "usage cap", "quota exceeded", "rate limit",
+        "rate_limit_exceeded",
+        "too many requests", "plan limit", " 429", "http 429",
+    )
+    if any(pattern in normalized for pattern in quota_patterns):
+        return "quota"
     auth_patterns = (
         "codex authentication unavailable", "not logged in", "login required",
         "authentication required", "not authenticated", "please login",
         "run codex login", "login expired", "unauthorized", "invalid api key", "token expired",
         "401 unauthorized", " 401",
     )
-    quota_patterns = (
-        "insufficient_quota", "usage limit", "usage cap", "quota exceeded", "rate limit",
-        "rate_limit_exceeded",
-        "too many requests", "plan limit", " 429", "http 429",
-    )
     if any(pattern in normalized for pattern in auth_patterns):
         return "authentication"
-    if any(pattern in normalized for pattern in quota_patterns):
-        return "quota"
     return None
 
 
@@ -422,10 +520,35 @@ def _dispatch_pause_reason(store: TaskStore) -> str:
     runner = store.get_service_status("runner")
     if runner and runner["status"] != "ready":
         return runner["detail"] or "Mac runner is unavailable."
+    quota = store.get_service_status("codex_quota")
+    if quota and quota["status"] == "unknown":
+        return quota["detail"] or "Codex quota is unavailable; dispatch is paused."
+    if quota and quota["status"] == "paused":
+        return quota["detail"]
+    _clear_recovered_quota_pause(store, quota)
     codex_queue = store.get_service_status("codex_queue")
     if codex_queue and codex_queue["status"] == "paused":
         return codex_queue["detail"] or "Codex queue is paused."
     return ""
+
+
+def _clear_recovered_quota_pause(store: TaskStore, quota: Any) -> None:
+    if not quota or quota["status"] not in {"healthy", "throttled"}:
+        return
+    paused = store.get_service_status("codex_queue")
+    if not paused or paused["status"] != "paused":
+        return
+    metadata = paused.get("metadata") or {}
+    category = metadata.get("category") if isinstance(metadata, dict) else None
+    task = store.get(str(metadata.get("task_id", ""))) if isinstance(metadata, dict) else None
+    original_category = _codex_outage_category(task.blocked_reason) if task else None
+    if category != "quota" and not (category == "authentication" and original_category == "quota"):
+        return
+    store.set_service_status(
+        "codex_queue", "ready",
+        "Previous quota-triggered queue pause cleared after a fresh quota check.",
+        {"category": "quota", "cleared_by": "fresh_quota_check"},
+    )
 
 
 def _remote_worker_is_running(task_id: str) -> bool:
@@ -447,6 +570,170 @@ def _remote_worker_is_running(task_id: str) -> bool:
     except (OSError, subprocess.TimeoutExpired, RuntimeError):
         print(f"Unable to probe Mac worker {task_id}; holding its task claim.")
         return True
+
+
+def _pull_job_spec(
+    store: TaskStore, task: Any, *, kind: JobKind, sequence: int,
+) -> dict[str, Any]:
+    base_branch = _task_base_branch(store, task)
+    task_branch = task.branch or (
+        f"agent/issue-{task.issue_number}"
+        if task.issue_number is not None
+        else f"agent/task-{task.task_id}"
+    )
+    config_names = (
+        "TARGET_ADAPTER", "AGENT_DEVCONTAINER_SCRIPT", "PLANNER_MODEL",
+        "CODER_MODEL", "REVIEWER_MODEL", "MAX_ATTEMPTS",
+        "MAX_FINAL_ATTEMPTS", "MAX_FINAL_REVIEW_ATTEMPTS", "MAX_REPAIRS",
+        "WORKFLOW_MODE",
+    )
+    config_snapshot = {key: os.environ[key] for key in config_names if key in os.environ}
+    config_snapshot["resume"] = kind == JobKind.REPAIR
+    if kind == JobKind.REPAIR and (
+        task.ci_status == "failed"
+        or task.metadata.get("final_review_status") == "changes_required"
+    ):
+        config_snapshot["repair_kind"] = "ci"
+    identity = f"{task.task_id}\0{sequence}\0{kind.value}".encode("utf-8")
+    job_id = hashlib.sha256(identity).hexdigest()[:32]
+    return {
+        "job_id": job_id,
+        "task_id": task.task_id,
+        "kind": kind.value,
+        "repository": task.repository,
+        "base_branch": base_branch,
+        "task_branch": task_branch,
+        "base_sha": "",
+        "expected_head_sha": str(task.metadata.get("final_review_head_sha") or ""),
+        "prompt": f"{task.title}\n\n{task.body}".strip(),
+        "config_snapshot": config_snapshot,
+        "required_capabilities": ["build", "codex", "git", "review"],
+    }
+
+
+def _queue_pull_runner_job(
+    store: TaskStore,
+    task: Any,
+    *,
+    expected_status: TaskStatus,
+    claimed_status: TaskStatus,
+    kind: JobKind,
+) -> dict[str, Any]:
+    sequence = int(task.metadata.get("runner_dispatch_sequence", 0))
+    spec = _pull_job_spec(store, task, kind=kind, sequence=sequence)
+    job_id = spec["job_id"]
+    task_metadata = dict(task.metadata)
+    task_metadata.pop("recovery_pending", None)
+    metadata = {
+        **task_metadata,
+        "worker_mode": "postgres_pull",
+        "runner_job_id": job_id,
+        "runner_job_kind": kind.value,
+        "runner_job_sequence": sequence,
+        "runner_job_spec": spec,
+    }
+    task = store.transition(
+        task.task_id, claimed_status, expected=expected_status, metadata=metadata,
+    )
+    job = store.get_job(job_id)
+    if job is None:
+        job = store.enqueue_job(spec, job_id=job_id, priority=task.priority)
+    return job
+
+
+def _reconcile_pull_runner_jobs(store: TaskStore) -> None:
+    active_statuses = {
+        TaskStatus.PLANNING, TaskStatus.IMPLEMENTING, TaskStatus.VALIDATING,
+        TaskStatus.REVIEWING, TaskStatus.PUBLISHING, TaskStatus.FINAL_REVIEW,
+    }
+    for task in store.list():
+        if task.metadata.get("worker_mode") != "postgres_pull":
+            continue
+        job_id = task.metadata.get("runner_job_id")
+        if not job_id:
+            continue
+        job = store.get_job(str(job_id))
+        if job is None:
+            spec = task.metadata.get("runner_job_spec")
+            if isinstance(spec, dict):
+                try:
+                    store.enqueue_job(spec, job_id=str(job_id), priority=task.priority)
+                    continue
+                except (RuntimeError, ValueError, KeyError) as error:
+                    result_detail = f"Reserved PostgreSQL runner job could not be restored: {error}"
+            else:
+                result_detail = "Reserved PostgreSQL runner job is missing its saved specification."
+            result_status = JobStatus.UNCERTAIN.value
+            job = {"kind": task.metadata.get("runner_job_kind", "unknown")}
+        else:
+            result_status = str(job["status"])
+            result_detail = ""
+        if job.get("kind") == JobKind.REVIEW.value:
+            continue
+        if result_status in {JobStatus.PENDING.value, JobStatus.RUNNING.value}:
+            continue
+        metadata = {
+            **task.metadata,
+            "last_runner_job": {
+                "job_id": job_id,
+                "kind": job.get("kind", "unknown"),
+                "status": result_status,
+                "runner_id": job.get("runner_id"),
+                "attempt_id": job.get("current_attempt_id"),
+                "result": job.get("result"),
+                "error": job.get("error"),
+            },
+            "runner_dispatch_sequence": int(
+                task.metadata.get("runner_job_sequence", 0)
+            ) + 1,
+        }
+        for key in ("runner_job_id", "runner_job_kind", "runner_job_sequence", "runner_job_spec"):
+            metadata.pop(key, None)
+        if result_status == JobStatus.UNCERTAIN.value:
+            reason = result_detail or (
+                "Runner lease expired; the previous process may still be active. "
+                "Prove it stopped before safely requeuing this job."
+            )
+        elif result_status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+            error = (job.get("error") or {}) if isinstance(job, dict) else {}
+            reason = task.blocked_reason or (
+                f"Pull runner job failed ({error.get('category', 'unknown')}); "
+                "inspect the runner log before retrying."
+            )
+        elif result_status == JobStatus.SUCCEEDED.value and task.status in active_statuses:
+            reason = (
+                "Pull runner exited successfully without recording a completed "
+                "workflow phase; inspect the saved checkpoint before retrying."
+            )
+        elif result_status == JobStatus.SUCCEEDED.value:
+            store.transition(task.task_id, task.status, metadata=metadata)
+            if task.status == TaskStatus.BLOCKED:
+                current = store.get(task.task_id)
+                if current is not None:
+                    _pause_on_codex_outage(store, current)
+            continue
+        else:
+            reason = f"Pull runner job finished with unrecognized status {result_status!r}."
+        if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+            store.transition(
+                task.task_id, task.status,
+                metadata={**metadata, "runner_job_warning": reason},
+            )
+            continue
+        if task.status != TaskStatus.BLOCKED:
+            store.transition(
+                task.task_id, TaskStatus.BLOCKED, expected=task.status,
+                blocked_reason=reason, metadata=metadata,
+            )
+        else:
+            store.transition(
+                task.task_id, TaskStatus.BLOCKED, expected=TaskStatus.BLOCKED,
+                blocked_reason=reason, metadata=metadata,
+            )
+        if result_status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+            current = store.get(task.task_id)
+            if current is not None:
+                _pause_on_codex_outage(store, current)
 
 
 def _publish_pending_slack_activity(store: TaskStore) -> None:
@@ -475,6 +762,12 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
         _publish_pending_slack_activity(store)
         _poll_ready_issues(store)
         _refresh_runner_health(store)
+        pull_transport = (
+            os.getenv("RUNNER_TRANSPORT", "ssh").strip().casefold()
+            == "postgres_pull"
+        )
+        if pull_transport:
+            _reconcile_pull_runner_jobs(store)
         running: list[tuple[subprocess.Popen[str], str]] = []
         live_worker_count = 0
         active_statuses = {
@@ -485,6 +778,14 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
             TaskStatus.PUBLISHING,
         }
         for active in store.list(active_statuses):
+            if active.metadata.get("worker_mode") == "postgres_pull":
+                job_id = active.metadata.get("runner_job_id")
+                job = store.get_job(str(job_id)) if job_id else None
+                if job and job["status"] in {
+                    JobStatus.PENDING.value, JobStatus.RUNNING.value,
+                }:
+                    live_worker_count += 1
+                continue
             pid = active.metadata.get("worker_pid")
             lease_owner = active.metadata.get("lease_owner")
             if _pid_alive(pid) and (not lease_owner or lease_owner == _SCHEDULER_OWNER):
@@ -532,8 +833,12 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
         if pause_reason:
             candidates = []
             _log_event("dispatch_paused", reason=pause_reason)
+        quota_status = store.get_service_status("codex_quota")
+        effective_worker_limit = worker_limit
+        if quota_status and quota_status["status"] == "throttled":
+            effective_worker_limit = min(effective_worker_limit, 1)
         for task in candidates:
-            if len(running) + live_worker_count >= worker_limit:
+            if len(running) + live_worker_count >= effective_worker_limit:
                 break
             claimed_status = (
                 TaskStatus.PLANNING
@@ -542,6 +847,37 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
             )
             claimed_metadata = dict(task.metadata)
             claimed_metadata.pop("recovery_pending", None)
+            claimed_metadata.pop("post_ci_review", None)
+            claimed_metadata["phase"] = (
+                "preparing" if task.status == TaskStatus.QUEUED else "repairing"
+            )
+            if pull_transport:
+                kind = (
+                    JobKind.IMPLEMENT
+                    if task.status == TaskStatus.QUEUED
+                    else JobKind.REPAIR
+                )
+                try:
+                    job = _queue_pull_runner_job(
+                        store, task, expected_status=task.status,
+                        claimed_status=claimed_status, kind=kind,
+                    )
+                except (OSError, RuntimeError, ValueError, KeyError) as error:
+                    latest = store.get(task.task_id)
+                    if latest and latest.status == claimed_status:
+                        store.transition(
+                            task.task_id, TaskStatus.BLOCKED,
+                            expected=claimed_status,
+                            blocked_reason=f"Unable to enqueue PostgreSQL runner job: {error}",
+                            metadata={**latest.metadata, "worker_mode": "postgres_pull"},
+                        )
+                    continue
+                live_worker_count += 1
+                _log_event(
+                    "runner_job_enqueued", task_id=task.task_id,
+                    job_id=job["job_id"], kind=job["kind"], status=job["status"],
+                )
+                continue
             try:
                 store.transition(
                     task.task_id,
@@ -765,16 +1101,11 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
         login = repository_config.get("notification_login", "")
         if not login:
             continue
-        promotion_status = (
-            task.metadata.get("release_promotion", {}).get("status", "not_required")
-            if task.status == TaskStatus.COMPLETED
-            else ""
-        )
         notification_status = (
             (
                 f"{task.status.value}:no_changes"
                 if task.metadata.get("completion", {}).get("outcome") == "no_changes"
-                else f"{task.status.value}:{promotion_status}"
+                else task.status.value
             )
             if task.status == TaskStatus.COMPLETED
             else task.status.value
@@ -787,14 +1118,13 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
             body = (
                 f"{mention}Investory Orchestrator is ready for human review.\n\n"
                 f"PR: {task.pr_url}\n"
-                "CI is green and the independent final review passed. Submit an "
-                "approving GitHub review to authorize the orchestrator to merge "
-                "this exact PR revision into the configured development branch."
+                "CI is green and the independent final review passed. Review and "
+                "merge the pull request when you are satisfied. The orchestrator "
+                "will record completion after it observes the merge and successful "
+                "post-merge CI."
             )
         elif task.status == TaskStatus.COMPLETED:
             completion = task.metadata.get("completion", {})
-            promotion = task.metadata.get("release_promotion", {})
-            promotion_status = promotion.get("status", "not_required")
             if completion.get("outcome") == "no_changes":
                 body = (
                     f"{mention}Task completed with no code changes.\n\n"
@@ -809,14 +1139,6 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
                     f"Merged PR: {task.pr_url}\n"
                     f"Merge commit: `{completion.get('merge_commit_sha', 'unknown')}`"
                 )
-            if promotion_status == "awaiting_review":
-                body += (
-                    f"\n\nRelease promotion PR: {promotion.get('pull_request_url')}\n"
-                    "It promotes the accumulated development branch to the release "
-                    "branch. Please review and merge when ready."
-                )
-            elif promotion_status == "pending":
-                body += "\n\nPreparing the development-to-release promotion PR."
         else:
             body = (
                 f"{mention}Investory Orchestrator is blocked and needs attention.\n\n"
@@ -840,12 +1162,7 @@ def _notify_terminal_tasks(store: TaskStore) -> None:
                 else f"Blocked: {task.blocked_reason or 'See dashboard for details.'}"
                 if task.status == TaskStatus.BLOCKED
                 else (
-                    f"Release PR awaiting review: "
-                    f"{task.metadata.get('release_promotion', {}).get('pull_request_url')}"
-                    if task.metadata.get("release_promotion", {}).get("status") == "awaiting_review"
-                    else "Preparing release promotion PR"
-                    if task.metadata.get("release_promotion", {}).get("status") == "pending"
-                    else "Completed with no changes; issue remains open"
+                    "Completed with no changes; issue remains open"
                     if task.metadata.get("completion", {}).get("outcome") == "no_changes"
                     else f"Merged PR: {task.pr_url}"
                 )
@@ -885,7 +1202,11 @@ def _poll_ci(store: TaskStore) -> None:
     ]
     for task in retryable_reviews:
         _run_final_review(store, task)
-    waiting = store.list({TaskStatus.WAITING_CI, TaskStatus.FINAL_REVIEW})
+    waiting = [
+        task for task in store.list({TaskStatus.WAITING_CI, TaskStatus.RUNNING})
+        if task.status == TaskStatus.WAITING_CI
+        or task.metadata.get("post_ci_review") is True
+    ]
     for task in waiting:
         if task.status == TaskStatus.FINAL_REVIEW:
             _run_final_review(store, task)
@@ -908,7 +1229,12 @@ def _poll_ci(store: TaskStore) -> None:
                 task.task_id,
                 TaskStatus.FINAL_REVIEW,
                 ci_status="green",
-                metadata={**task.metadata, "ci_details": details},
+                metadata={
+                    **task.metadata,
+                    "ci_details": details,
+                    "phase": "reviewing",
+                    "post_ci_review": True,
+                },
             )
             _run_final_review(store, updated)
         elif state == "failure":
@@ -923,129 +1249,9 @@ def _poll_ci(store: TaskStore) -> None:
                 ci_status="failed",
                 ci_attempts=task.ci_attempts + 1,
                 blocked_reason="CI failed; repair requires --resume after inspecting the saved workflow.",
-                metadata={**task.metadata, "ci_details": details},
+                metadata={**task.metadata, "ci_details": details, "phase": "repairing"},
             )
-    _poll_approved_ready_tasks(store)
     _poll_merged_tasks(store)
-    _ensure_release_promotion_prs(store)
-
-
-def _poll_approved_ready_tasks(store: TaskStore) -> None:
-    """Merge READY task PRs only after the configured user approves that exact head."""
-    from app.github_client import GitHubAppClient
-
-    release_branch = os.getenv("RELEASE_BRANCH", "main").strip() or "main"
-    merge_method = os.getenv("APPROVED_PR_MERGE_METHOD", "squash").strip()
-    for task in store.list({TaskStatus.READY}):
-        base_branch = _task_base_branch(store, task)
-        if base_branch.casefold() == release_branch.casefold():
-            continue
-        repository_config = store.get_repository(task.repository) or {}
-        reviewer = str(repository_config.get("notification_login", "")).strip()
-        if not reviewer or not task.pr_number:
-            continue
-        try:
-            client = GitHubAppClient(task.repository)
-            details = client.get_pull_request_details(task.pr_number)
-            expected_head = task.metadata.get("final_review_head_sha", "")
-            if (
-                details["state"] != "open"
-                or details["is_merged"]
-                or details["is_draft"]
-                or details["base_ref"] != base_branch
-                or details["head_ref"] != task.branch
-                or not expected_head
-                or details["head_sha"] != expected_head
-            ):
-                continue
-            approval = client.get_latest_review_approval(task.pr_number, reviewer)
-            if (
-                not approval
-                or approval["state"] != "APPROVED"
-                or approval["commit_sha"] != expected_head
-                or approval["current_head_sha"] != expected_head
-            ):
-                continue
-            ci_state, _ = client.get_pull_request_ci(task.pr_number)
-            if ci_state != "success":
-                continue
-            approval = client.merge_approved_pull_request(
-                task.pr_number,
-                reviewer_login=reviewer,
-                expected_head_sha=expected_head,
-                merge_method=merge_method,
-            )
-            current = store.get(task.task_id)
-            if current and current.status == TaskStatus.READY:
-                store.transition(
-                    current.task_id,
-                    TaskStatus.READY,
-                    metadata={**current.metadata, "approval_merge": approval},
-                )
-            print(
-                f"Merged PR #{task.pr_number} after @{reviewer} approved "
-                f"the reviewed head {expected_head}."
-            )
-        except (RuntimeError, ValueError, KeyError) as error:
-            print(f"Unable to merge approved task {task.task_id}: {error}")
-
-
-def _ensure_release_promotion_prs(store: TaskStore) -> None:
-    """Open or reuse a develop-to-main PR after task merge and post-merge CI."""
-    from app.github_client import GitHubAppClient
-
-    release_branch = os.getenv("RELEASE_BRANCH", "main").strip() or "main"
-    for task in store.list({TaskStatus.COMPLETED}):
-        promotion = task.metadata.get("release_promotion", {})
-        if promotion.get("status") != "pending":
-            continue
-        completion = task.metadata.get("completion", {})
-        development_branch = str(completion.get("base_branch", "")).strip()
-        if not development_branch or development_branch.casefold() == release_branch.casefold():
-            continue
-        try:
-            client = GitHubAppClient(task.repository)
-            pull_request = client.find_open_pr_by_branch(
-                development_branch, base=release_branch
-            )
-            if pull_request is None:
-                pull_request = client.create_release_promotion_pr(
-                    head=development_branch,
-                    base=release_branch,
-                )
-            issue_link = (
-                f"https://github.com/{task.repository}/issues/{task.issue_number}"
-                if task.issue_number is not None
-                else task.repository
-            )
-            marker = "<!-- investory-orchestrator-release-promotion -->"
-            client.upsert_issue_comment(
-                pull_request.number,
-                f"{marker}\nTask PR [#{task.pr_number}]({task.pr_url}) for "
-                f"[{task.repository} issue #{task.issue_number}]({issue_link}) "
-                f"merged into `{development_branch}` with successful post-merge CI. "
-                f"This PR promotes accumulated `{development_branch}` changes to "
-                f"`{release_branch}`; review and merge it manually when ready.",
-                marker=marker,
-            )
-            current = store.get(task.task_id)
-            if current and current.status == TaskStatus.COMPLETED:
-                store.transition(
-                    current.task_id,
-                    TaskStatus.COMPLETED,
-                    metadata={
-                        **current.metadata,
-                        "release_promotion": {
-                            "status": "awaiting_review",
-                            "pull_request_number": pull_request.number,
-                            "pull_request_url": pull_request.html_url,
-                            "head_branch": development_branch,
-                            "base_branch": release_branch,
-                        },
-                    },
-                )
-        except (RuntimeError, ValueError, KeyError) as error:
-            print(f"Unable to prepare release promotion for {task.task_id}: {error}")
 
 
 def _task_base_branch(store: TaskStore, task: Any) -> str:
@@ -1129,12 +1335,6 @@ def _record_merged_task(
                 else {}
             ),
         },
-        "release_promotion": (
-            {"status": "pending", "base_branch": expected_base}
-            if expected_base.casefold()
-            != (os.getenv("RELEASE_BRANCH", "main").strip() or "main").casefold()
-            else {"status": "not_required"}
-        ),
     }
     store.transition(
         task.task_id,
@@ -1246,8 +1446,12 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
 
     metadata = task.metadata
     try:
-        remote_review = bool(_ssh_target())
-        verify_pr = remote_review or bool(os.getenv("GITHUB_APP_ID"))
+        pull_review = (
+            os.getenv("RUNNER_TRANSPORT", "ssh").strip().casefold()
+            == "postgres_pull"
+        )
+        remote_review = not pull_review and bool(_ssh_target())
+        verify_pr = pull_review or remote_review or bool(os.getenv("GITHUB_APP_ID"))
         if verify_pr:
             if task.pr_number is None:
                 raise RuntimeError("Task has no pull request for final review")
@@ -1284,7 +1488,85 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
             "coder_report": metadata.get("coder_report"),
             "workspace_audit": metadata.get("workspace_audit"),
         }
-        if remote_review:
+        if pull_review:
+            review_job_id = metadata.get("final_review_job_id")
+            review_spec = metadata.get("final_review_job_spec")
+            if not review_job_id:
+                sequence = int(metadata.get("final_review_job_sequence", 0))
+                identity = (
+                    f"{task.task_id}\0REVIEW\0{details['head_sha']}\0{sequence}"
+                ).encode("utf-8")
+                review_job_id = hashlib.sha256(identity).hexdigest()[:32]
+                config_snapshot = {
+                    key: os.environ[key]
+                    for key in ("REVIEWER_MODEL", "MAX_FINAL_REVIEW_ATTEMPTS")
+                    if key in os.environ
+                }
+                review_spec = {
+                    "job_id": review_job_id,
+                    "task_id": task.task_id,
+                    "kind": JobKind.REVIEW.value,
+                    "repository": task.repository,
+                    "base_branch": expected_base,
+                    "task_branch": task.branch,
+                    "base_sha": str(request.get("baseline_sha") or ""),
+                    "expected_head_sha": details["head_sha"],
+                    "prompt": f"Review final PR head for task {task.task_id}",
+                    "config_snapshot": config_snapshot,
+                    "required_capabilities": ["codex", "git", "review"],
+                    "review_request": request,
+                }
+                reserved = {
+                    **metadata,
+                    "final_review_job_id": review_job_id,
+                    "final_review_job_spec": review_spec,
+                    "final_review_job_head_sha": details["head_sha"],
+                }
+                store.transition(
+                    task.task_id, TaskStatus.FINAL_REVIEW, expected=task.status,
+                    metadata=reserved,
+                )
+                if store.get_job(review_job_id) is None:
+                    store.enqueue_job(review_spec, job_id=review_job_id)
+                return
+            review_job = store.get_job(str(review_job_id))
+            if review_job is None and isinstance(review_spec, dict):
+                review_job = store.enqueue_job(
+                    review_spec, job_id=str(review_job_id),
+                )
+            if review_job is None:
+                raise RuntimeError("Reserved final-review runner job is missing")
+            if review_job["status"] in {
+                JobStatus.PENDING.value, JobStatus.RUNNING.value,
+            }:
+                return
+            if review_job["status"] != JobStatus.SUCCEEDED.value:
+                error = review_job.get("error") or {}
+                raise RuntimeError(
+                    "Final-review runner job "
+                    f"{review_job['status']}: {error.get('category', 'unknown')}"
+                )
+            job_result = review_job.get("result") or {}
+            reviewed = job_result.get("worker_result")
+            if not isinstance(reviewed, dict):
+                raise RuntimeError("Final-review runner returned no review result")
+            if (
+                reviewed.get("task_id") != task.task_id
+                or reviewed.get("head_sha") != details["head_sha"]
+                or reviewed.get("branch") != details["head_ref"]
+            ):
+                raise RuntimeError("Pull runner returned mismatched task or PR evidence")
+            review_data = ReviewResult.model_validate(reviewed["review"]).model_dump(
+                mode="json"
+            )
+            reviewer = reviewed["reviewer_identity"]
+            if not isinstance(reviewer, dict) or not all(
+                isinstance(reviewer.get(key), str)
+                for key in ("backend", "provider", "model")
+            ):
+                raise RuntimeError("Pull runner returned an invalid reviewer identity")
+            clean_worktree = reviewed.get("clean_worktree") is True
+        elif remote_review:
             result = subprocess.run(
                 _ssh_command(["review", task.task_id]),
                 input=json.dumps(request),
@@ -1365,6 +1647,14 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
         RuntimeError, ValueError, KeyError, OSError, json.JSONDecodeError,
         subprocess.SubprocessError,
     ) as error:
+        metadata = dict(metadata)
+        if pull_review:
+            metadata.pop("final_review_job_id", None)
+            metadata.pop("final_review_job_spec", None)
+            metadata.pop("final_review_job_head_sha", None)
+            metadata["final_review_job_sequence"] = int(
+                metadata.get("final_review_job_sequence", 0)
+            ) + 1
         attempts = metadata.get("final_review_attempts", 0) + 1
         retry_limit = max(0, int(os.getenv("MAX_FINAL_REVIEW_ATTEMPTS", "3")))
         retryable = attempts < retry_limit
@@ -1401,6 +1691,13 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
         "final_review_retryable": False,
         "final_review_head_sha": details["head_sha"],
     }
+    if pull_review:
+        updated.pop("final_review_job_id", None)
+        updated.pop("final_review_job_spec", None)
+        updated.pop("final_review_job_head_sha", None)
+        updated["final_review_job_sequence"] = int(
+            metadata.get("final_review_job_sequence", 0)
+        ) + 1
     if review_data["status"] == "approved":
         missing_gates: list[str] = []
         if task.ci_status != "green":
@@ -1455,5 +1752,6 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
             "final_review_status": "changes_required",
             "final_review_feedback": feedback,
             "final_review_repairs": metadata.get("final_review_repairs", 0) + 1,
+            "phase": "repairing",
         },
     )

@@ -107,7 +107,7 @@ class FakeGitHub:
             "head_sha": self.branch_heads.get(pull_request["head"], "final-sha"),
             "merge_commit_sha": "c" * 40 if self.merged else None,
             "merged_at": "2026-10-07T12:00:00Z" if self.merged else "",
-            "merged_by": "investory-orchestrator[bot]" if self.merged else "",
+            "merged_by": "spider-su" if self.merged else "",
             "title": pull_request["title"],
             "body": pull_request["body"],
         }
@@ -163,7 +163,7 @@ class OrchestrationIntegrationTests(unittest.TestCase):
         self.assertIn("blocked and needs attention", terminal[0])
         self.assertEqual(blocked.metadata["terminal_notification_status"], "BLOCKED")
 
-    def test_issue_approval_merges_develop_and_opens_release_pr(self) -> None:
+    def test_approval_does_not_merge_and_human_merge_completes_task(self) -> None:
         github = FakeGitHub()
         plan = ImplementationPlan(
             goal="Complete the fixture",
@@ -277,49 +277,25 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                         ready.metadata.get("final_review_head_sha"), "final-sha"
                     )
                     _poll_ci(store)
+                    still_ready = store.get(task.task_id)
+                    self.assertEqual(still_ready.status, TaskStatus.READY)
+                    self.assertEqual(github.merge_calls, [])
+                    self.assertEqual(github.release_prs, [])
+                    self.assertEqual(github.closed_issues, [])
+
+                    # Simulate the configured reviewer merging the PR in GitHub.
+                    github.merged = True
+                    _poll_ci(store)
                     completed = store.get(task.task_id)
-                    store.transition(
-                        task.task_id,
-                        TaskStatus.COMPLETED,
-                        metadata={
-                            **completed.metadata,
-                            "release_promotion": {
-                                **completed.metadata["release_promotion"],
-                                "status": "pending",
-                            },
-                        },
-                    )
-                    _notify_terminal_tasks(store)
-                    pending_notification = next(
-                        comment for comment in github.comments
-                        if "terminal-notification" in comment
-                    )
-                    pending = store.get(task.task_id)
-                    store.transition(
-                        task.task_id,
-                        TaskStatus.COMPLETED,
-                        metadata={
-                            **pending.metadata,
-                            "release_promotion": {
-                                **pending.metadata["release_promotion"],
-                                "status": "awaiting_review",
-                            },
-                        },
-                    )
                     _notify_terminal_tasks(store)
 
         self.assertEqual(ready_notified.status, TaskStatus.READY)
         self.assertEqual(completed.status, TaskStatus.COMPLETED)
-        self.assertEqual(completed.metadata["completion"]["source"], "approved_review")
-        self.assertEqual(completed.metadata["completion"]["approval_review"]["review_id"], "7001")
+        self.assertEqual(completed.metadata["completion"]["source"], "human_merge")
         self.assertTrue(completed.metadata["completion"]["issue_closed"])
-        self.assertEqual(
-            completed.metadata["release_promotion"]["status"], "awaiting_review"
-        )
-        self.assertEqual(completed.metadata["release_promotion"]["pull_request_number"], 24)
-        self.assertEqual(github.merge_calls[0]["reviewer"], "spider-su")
-        self.assertEqual(github.merge_calls[0]["head"], "final-sha")
-        self.assertEqual(github.release_prs, [{"head": "develop", "base": "main"}])
+        self.assertNotIn("release_promotion", completed.metadata)
+        self.assertEqual(github.merge_calls, [])
+        self.assertEqual(github.release_prs, [])
         self.assertEqual(github.closed_issues, [42])
         terminal_comment = next(
             comment for comment in github.comments
@@ -328,9 +304,9 @@ class OrchestrationIntegrationTests(unittest.TestCase):
         self.assertIn("@spider-su", terminal_comment)
         self.assertIn("Merged PR: https://example.test/pull/23", terminal_comment)
         self.assertNotIn("Draft PR", terminal_comment)
-        self.assertIn("Release promotion PR: https://example.test/pull/24", terminal_comment)
-        self.assertIn("Preparing the development-to-release promotion PR.", pending_notification)
-        self.assertIn("approving GitHub review", ready_notification)
+        self.assertNotIn("Release promotion", terminal_comment)
+        self.assertIn("merge the pull request", ready_notification)
+        self.assertNotIn("authorize the orchestrator", ready_notification)
         self.assertEqual(github.ready_prs, [23])
         self.assertEqual(len(github.pull_requests), 1)
         self.assertEqual(github.pull_requests[0]["base"], "develop")
