@@ -106,6 +106,14 @@ the existing graph CLI, so the target single-invocation Codex workflow is not
 complete. Do not enable both dispatch paths or switch production to pull mode
 before isolated PostgreSQL and live recovery acceptance tests pass.
 
+The transaction suite runs in CI against PostgreSQL 16. A one-shot devMac
+runner has also completed a fixture job against the live scheduler database
+through a temporary port-forward and a disposable schema. This does not verify
+the persistent LaunchAgent, direct Mac database connectivity, real issue-to-PR
+execution, or restart/crash recovery. The deployment remains on SSH/legacy
+defaults; see [`postgres-runner-acceptance.md`](postgres-runner-acceptance.md)
+for the current acceptance inventory.
+
 Task PRs require human merging. The scheduler observes the merge and reconciles
 successful post-merge CI into the task lifecycle.
 

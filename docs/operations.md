@@ -459,6 +459,10 @@ The pull worker still invokes the existing task CLI and the existing task-state
 model remains in place. Pull transport is available for acceptance testing but
 is not the deployed default.
 
+See [`postgres-runner-acceptance.md`](postgres-runner-acceptance.md) for the
+verified transaction and one-shot runner evidence, plus the outstanding
+deployment and end-to-end acceptance steps.
+
 ### PostgreSQL integration tests on the dev database
 
 The Investory development PostgreSQL server at `192.168.1.60` is reserved for

@@ -96,7 +96,10 @@ pauses new work at 5%; thresholds are configurable with
 The PostgreSQL pull-runner path is integrated and opt-in with
 `RUNNER_TRANSPORT=postgres_pull`; SSH remains the default. Do not switch the
 deployed scheduler to pull mode until its live acceptance scenarios pass; see
-[`docs/simplification-audit.md`](docs/simplification-audit.md).
+[`docs/postgres-runner-acceptance.md`](docs/postgres-runner-acceptance.md) for
+the current evidence and remaining gates, and
+[`docs/simplification-audit.md`](docs/simplification-audit.md) for the
+migration rationale.
 
 With `MAC_SSH_TARGET` configured, whole-plan final review runs on the Mac
 runner against the exact open PR head. The scheduler polls READY tasks and
