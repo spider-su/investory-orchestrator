@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -12,6 +13,46 @@ from app.tasks import JobStatus, TaskStore
 
 
 class RunnerDaemonTests(unittest.TestCase):
+    def test_launch_script_works_when_started_outside_repository(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            output = root / "runner-invocation.txt"
+            python = root / "fake-python"
+            python.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n%s\\n' \"$PWD\" \"$*\" "
+                "> \"$RUNNER_SCRIPT_TEST_OUTPUT\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o700)
+            environment_file = root / "runner.env"
+            environment_file.write_text(
+                f"RUNNER_PYTHON={python}\n"
+                f"RUNNER_SCRIPT_TEST_OUTPUT={output}\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["sh", str(repository / "scripts/runner-daemon.sh")],
+                cwd=outside,
+                env={
+                    **os.environ,
+                    "HOME": str(root),
+                    "RUNNER_ENV_FILE": str(environment_file),
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invoked_from, arguments = output.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(Path(invoked_from), repository)
+            self.assertEqual(arguments, "-m app.runner_daemon")
+
     def test_restart_does_not_claim_a_job_already_running(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

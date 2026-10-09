@@ -57,6 +57,21 @@ completion gate.
 | **POC:** READY/BLOCKED GitHub issue mention | Yes | No | No |
 | **POC:** GitHub Projects tracking and priority synchronization | No | No | No |
 
+## PostgreSQL pull-runner acceptance snapshot
+
+As of 2026-10-09, PostgreSQL claim/lease/result behavior has automated coverage
+in CI against an ephemeral PostgreSQL 16 service. A one-shot devMac runner also
+claimed and completed a fixture job through the scheduler's PostgreSQL service
+using a temporary port-forward and an isolated schema. The schema was removed
+and verified absent afterward.
+
+This is transport and job-lifecycle evidence, not full workflow acceptance.
+The deployed scheduler remains on SSH and the legacy graph; the Mac has no
+installed pull-runner LaunchAgent or direct database route. Full issue-to-PR,
+repair, restart/crash, CI, and human-merge scenarios remain unverified. See
+[`docs/postgres-runner-acceptance.md`](docs/postgres-runner-acceptance.md) for
+the evidence matrix and migration gates.
+
 Definitions:
 
 - **Implemented:** an executable code path exists.

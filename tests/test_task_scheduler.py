@@ -15,6 +15,7 @@ from app.task_scheduler import (
     _poll_ci,
     _notify_terminal_tasks,
     _poll_ready_issues,
+    _pull_job_spec,
     _queue_pull_runner_job,
     _reconcile_pull_runner_jobs,
     _run_final_review,
@@ -238,7 +239,7 @@ class TaskSchedulerTests(unittest.TestCase):
             JobStatus.PENDING.value,
         )
 
-    def test_pull_job_reconciliation_restores_reserved_job_after_scheduler_restart(self) -> None:
+    def test_pull_job_reconciliation_blocks_when_reserved_job_is_missing(self) -> None:
         task = self.store.create(
             title="Reserved task", body="Prompt", repository="spider-su/investory",
         )
@@ -251,9 +252,35 @@ class TaskSchedulerTests(unittest.TestCase):
 
         _reconcile_pull_runner_jobs(self.store)
 
-        restored = self.store.get_job(job["job_id"])
-        self.assertEqual(restored["status"], JobStatus.PENDING.value)
+        self.assertIsNone(self.store.get_job(job["job_id"]))
+        current = self.store.get(task.task_id)
+        self.assertEqual(current.status, TaskStatus.BLOCKED)
+        self.assertIn("previous process state cannot be proven", current.blocked_reason)
+        self.assertEqual(
+            current.metadata["uncertain_runner_job"]["job_id"], job["job_id"],
+        )
+        self.assertIsInstance(
+            current.metadata["uncertain_runner_job"]["job_spec"], dict,
+        )
+
+    def test_pull_job_is_reused_after_scheduler_restart_before_task_reservation(self) -> None:
+        task = self.store.create(
+            title="Pending job after restart", body="Prompt",
+            repository="spider-su/investory",
+        )
+        expected = _pull_job_spec(
+            self.store, task, kind=JobKind.IMPLEMENT, sequence=0,
+        )
+        queued = self.store.enqueue_job(expected, job_id=expected["job_id"])
+
+        resumed = _queue_pull_runner_job(
+            self.store, task, expected_status=TaskStatus.QUEUED,
+            claimed_status=TaskStatus.PLANNING, kind=JobKind.IMPLEMENT,
+        )
+
+        self.assertEqual(resumed["job_id"], queued["job_id"])
         self.assertEqual(self.store.get(task.task_id).status, TaskStatus.PLANNING)
+        self.assertEqual(len(self.store.list_job_attempts(queued["job_id"])), 0)
 
     def test_pull_job_completion_is_reconciled_without_retrying_running_work(self) -> None:
         task = self.store.create(
@@ -364,6 +391,50 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual(completed_review.status, TaskStatus.READY)
         self.assertEqual(completed_review.metadata["final_review_head_sha"], "b" * 40)
         self.assertNotIn("final_review_job_id", completed_review.metadata)
+
+    def test_missing_reserved_pull_review_is_blocked_without_requeue(self) -> None:
+        task = self.store.create(
+            issue_number=211, title="Review recovery safety", body="Prompt",
+            repository="spider-su/investory",
+            metadata={
+                "base_branch": "develop",
+                "issue_number": 211,
+                "issue_title": "Review recovery safety",
+                "issue_body": "Prompt",
+                "plan": {"summary": "Fixture plan", "steps": []},
+                "final_validation_status": "validation_success",
+                "final_review_job_id": "a" * 32,
+            },
+        )
+        task = self.store.transition(task.task_id, TaskStatus.RUNNING)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.WAITING_CI,
+            ci_status="green",
+            workspace="/runner/workspaces/issue-211",
+            branch="agent/issue-211",
+            pr_number=211,
+            pr_url="https://github.com/spider-su/investory/pull/211",
+        )
+        github = SimpleNamespace(get_pull_request_details=lambda _number: {
+            "is_merged": False,
+            "state": "open",
+            "base_ref": "develop",
+            "head_ref": "agent/issue-211",
+            "head_sha": "c" * 40,
+        })
+        with patch.dict(os.environ, {"RUNNER_TRANSPORT": "postgres_pull"}, clear=False):
+            with patch("app.github_client.GitHubAppClient", return_value=github):
+                _run_final_review(self.store, task)
+
+        current = self.store.get(task.task_id)
+        self.assertEqual(current.status, TaskStatus.BLOCKED)
+        self.assertIn("will not be dispatched again", current.blocked_reason)
+        self.assertIsNone(self.store.get_job("a" * 32))
+        self.assertEqual(
+            current.metadata["uncertain_final_review_job"]["head_sha"],
+            "c" * 40,
+        )
 
     def test_remote_worker_rejects_invalid_ssh_target(self) -> None:
         task = self.store.create(title="remote", issue_number=43)
@@ -586,6 +657,8 @@ class TaskSchedulerTests(unittest.TestCase):
                 "branch": "codex/task",
                 "final_validation_status": "validation_success",
                 "final_review_status": "approved",
+                "coder_provider": "codex-cli",
+                "coder_model": "gpt-6.1-sol",
             },
         )
 
@@ -593,6 +666,30 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual(saved.status, TaskStatus.WAITING_CI)
         self.assertEqual(saved.pr_number, 18)
         self.assertEqual(saved.ci_status, "queued")
+        self.assertEqual(saved.metadata["coder_provider"], "codex-cli")
+        self.assertEqual(saved.metadata["coder_model"], "gpt-6.1-sol")
+
+    def test_blocked_workflow_persists_coder_identity_for_final_review_gate(self) -> None:
+        task = self.store.create(title="Blocked with coder evidence")
+        task = self.store.transition(task.task_id, TaskStatus.PLANNING)
+        task = self.store.transition(task.task_id, TaskStatus.IMPLEMENTING)
+
+        _sync_task_result(
+            self.store,
+            task.task_id,
+            {
+                "workflow_status": "blocked",
+                "blocked_reason": "Validation requires a repair.",
+                "blocked_stage": "validation",
+                "coder_provider": "codex-cli",
+                "coder_model": "gpt-6.1-sol",
+            },
+        )
+
+        saved = self.store.get(task.task_id)
+        self.assertEqual(saved.status, TaskStatus.BLOCKED)
+        self.assertEqual(saved.metadata["coder_provider"], "codex-cli")
+        self.assertEqual(saved.metadata["coder_model"], "gpt-6.1-sol")
 
     def test_no_change_workflow_completes_without_pr_or_issue_close(self) -> None:
         task = self.store.create(
