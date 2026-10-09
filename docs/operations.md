@@ -470,20 +470,22 @@ do not copy credentials into this repository or print them in logs. The active
 `local` profile may point to another database, so select the `.60` stanza
 explicitly and verify the JDBC target before creating objects.
 
-The pull-runner PostgreSQL test schema is
-`orchestrator_test_20261008`. It is separate from Investory's `investory`
-application schema. The integration test resets only Orchestrator tables in
-that schema before and after running; do not place unrelated objects there.
-Build a local `TEST_POSTGRES_URL` like
+The pull-runner PostgreSQL integration tests create a unique schema for each
+test under an operator-supplied prefix such as
+`orchestrator_test_20261009_a1b2c3d4`. They drop only that unique schema after
+the test. Never point these tests at production. Build a local
+`TEST_POSTGRES_URL` like
 `postgresql://USER:PASSWORD@192.168.1.60:5432/inventory?client_encoding=UTF8`
 from the `.60` JDBC settings in the local shell, set
 `client_encoding=UTF8` in the URL (the development database uses `SQL_ASCII`),
-set `TEST_POSTGRES_SCHEMA=orchestrator_test_20261008`, then run:
+and choose a fresh test prefix:
 
 ```bash
+export TEST_POSTGRES_SCHEMA="orchestrator_test_$(date -u +%Y%m%d)_$(python -c 'import secrets; print(secrets.token_hex(4))')"
 python -m unittest tests.test_runner_job_store -v
 ```
 
 Keep the `TEST_POSTGRES_URL` value local and out of `.env.example`, commits,
-command transcripts, and task specifications. CI leaves this integration test
-skipped unless both test variables are explicitly configured.
+command transcripts, and task specifications. Pull-request CI runs these
+transaction tests against an ephemeral PostgreSQL service; the real development
+database remains an opt-in local acceptance target.

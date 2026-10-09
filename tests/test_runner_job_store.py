@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.tasks import JobStatus, TaskStore
+from app.runner_job_worker import run_job
 
 
 def job_spec(task_id: str, *, capabilities: list[str] | None = None) -> dict:
@@ -228,23 +229,23 @@ class PostgreSqlRunnerJobTests(unittest.TestCase):
         import psycopg
 
         with psycopg.connect(os.environ["TEST_POSTGRES_URL"]) as connection:
-            connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
-            connection.execute(
-                f'DROP TABLE IF EXISTS "{self.schema}".job_attempts, '
-                f'"{self.schema}".jobs, "{self.schema}".runners, '
-                f'"{self.schema}".task_activity, "{self.schema}".task_events, '
-                f'"{self.schema}".service_status, "{self.schema}".repository_configs, '
-                f'"{self.schema}".tasks CASCADE'
-            )
+            connection.execute(f'DROP SCHEMA IF EXISTS "{self.schema}" CASCADE')
 
     def setUp(self) -> None:
-        self.schema = os.environ["TEST_POSTGRES_SCHEMA"]
-        if not re.fullmatch(r"orchestrator_test_[0-9]{8}", self.schema):
-            raise ValueError("TEST_POSTGRES_SCHEMA must be a dedicated orchestrator_test_YYYYMMDD schema")
+        schema_prefix = os.environ["TEST_POSTGRES_SCHEMA"]
+        if not re.fullmatch(r"orchestrator_test_[0-9]{8}_[a-f0-9]{8}", schema_prefix):
+            raise ValueError(
+                "TEST_POSTGRES_SCHEMA must be an isolated "
+                "orchestrator_test_YYYYMMDD_<run-id> schema prefix"
+            )
+        self.schema = f"{schema_prefix}_{uuid.uuid4().hex[:8]}"
         self.temp_dir = tempfile.TemporaryDirectory()
         self.previous_schema = os.environ.get("ORCHESTRATOR_SCHEMA")
         os.environ["ORCHESTRATOR_SCHEMA"] = self.schema
-        self._clear_test_tables()
+        import psycopg
+
+        with psycopg.connect(os.environ["TEST_POSTGRES_URL"]) as connection:
+            connection.execute(f'CREATE SCHEMA "{self.schema}"')
         self.store = TaskStore(os.environ["TEST_POSTGRES_URL"])
         self.task = self.store.create(
             source="direct_prompt", title="Postgres fixture", body="Criteria",
@@ -269,3 +270,124 @@ class PostgreSqlRunnerJobTests(unittest.TestCase):
         self.assertEqual(len(values), 1)
         self.assertEqual(values[0]["job_id"], job["job_id"])
         self.assertEqual(len(self.store.list_job_attempts(job["job_id"])), 1)
+
+    def test_postgres_expired_attempt_is_fenced_until_stop_is_proven(self) -> None:
+        self.store.register_runner(
+            "runner-1", capabilities={"codex", "git", "build"},
+        )
+        job = self.store.enqueue_job(job_spec(self.task.task_id))
+        first = self.store.claim_job("runner-1", lease_seconds=10)
+        first_attempt = first["current_attempt_id"]
+
+        expired = self.store.mark_expired_jobs_uncertain(
+            now=first["lease_expires_at"] + 1,
+        )
+
+        self.assertEqual(expired, [job["job_id"]])
+        self.assertFalse(self.store.heartbeat_job(
+            job["job_id"], "runner-1", first_attempt,
+        ))
+        self.assertFalse(self.store.complete_job(
+            job["job_id"], "runner-1", first_attempt, result={"ok": True},
+        ))
+        with self.assertRaisesRegex(ValueError, "requires proof"):
+            self.store.safely_requeue_uncertain_job(
+                job["job_id"], first_attempt, previous_process_stopped=False,
+            )
+
+        self.assertTrue(self.store.safely_requeue_uncertain_job(
+            job["job_id"], first_attempt, previous_process_stopped=True,
+        ))
+        second = self.store.claim_job("runner-1")
+        self.assertNotEqual(second["current_attempt_id"], first_attempt)
+        self.assertFalse(self.store.complete_job(
+            job["job_id"], "runner-1", first_attempt, result={"ok": True},
+        ))
+        self.assertEqual(len(self.store.list_job_attempts(job["job_id"])), 2)
+
+    def test_postgres_submission_is_idempotent_and_branch_is_serialized(self) -> None:
+        self.store.register_runner(
+            "runner-1", capabilities={"codex", "git", "build"},
+        )
+        first_spec = job_spec(self.task.task_id)
+        job_id = uuid.uuid4().hex
+        first = self.store.enqueue_job(first_spec, job_id=job_id)
+        duplicate = self.store.enqueue_job(first_spec, job_id=job_id)
+        self.assertEqual(first["job_id"], duplicate["job_id"])
+
+        conflicting = {**first_spec, "prompt": "Different immutable prompt"}
+        with self.assertRaisesRegex(ValueError, "different immutable context"):
+            self.store.enqueue_job(conflicting, job_id=job_id)
+
+        second_task = self.store.create(
+            source="direct_prompt", title="Same branch", body="Criteria",
+            repository="owner/repository",
+        )
+        second_spec = job_spec(second_task.task_id)
+        second_spec["task_branch"] = first_spec["task_branch"]
+        second = self.store.enqueue_job(second_spec)
+
+        claimed = self.store.claim_job("runner-1")
+        self.assertEqual(claimed["job_id"], first["job_id"])
+        self.assertIsNone(self.store.claim_job("runner-1"))
+        self.assertEqual(
+            self.store.get_job(second["job_id"])["status"],
+            JobStatus.PENDING.value,
+        )
+
+    def test_postgres_runner_executes_and_persists_result_from_outside_repo(self) -> None:
+        self.store.register_runner(
+            "runner-1", capabilities={"codex", "git", "build"},
+        )
+        job = self.store.enqueue_job(job_spec(self.task.task_id))
+        claimed = self.store.claim_job("runner-1")
+        fake_python = Path(self.temp_dir.name) / "fake-python"
+        fake_python.write_text(
+            "#!/bin/sh\n"
+            "python3 -c 'import json,os; "
+            "json.dump({\"status\":\"fixture-completed\"}, "
+            "open(os.environ[\"RUNNER_JOB_RESULT_PATH\"], \"w\"))'\n",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o700)
+        result_dir = Path(self.temp_dir.name) / "results"
+        with patch.dict(os.environ, {
+            "DATABASE_URL": os.environ["TEST_POSTGRES_URL"],
+            "ORCHESTRATOR_SCHEMA": self.schema,
+            "RUNNER_TASK_PYTHON": str(fake_python),
+            "RUNNER_RESULT_DIR": str(result_dir),
+            "RUNNER_RUNS_DIR": str(Path(self.temp_dir.name) / "runs"),
+            "RUNNER_WORKSPACES_DIR": str(Path(self.temp_dir.name) / "workspaces"),
+            "RUNNER_JOB_LEASE_SECONDS": "30",
+            "RUNNER_HEARTBEAT_SECONDS": "5",
+        }, clear=False):
+            result = run_job(job["job_id"], claimed["current_attempt_id"])
+
+        self.assertEqual(result, 0)
+        saved = self.store.get_job(job["job_id"])
+        self.assertEqual(saved["status"], JobStatus.SUCCEEDED.value)
+        self.assertEqual(
+            saved["result"]["worker_result"],
+            {"status": "fixture-completed"},
+        )
+
+    def test_postgres_task_cannot_have_two_running_jobs(self) -> None:
+        self.store.register_runner(
+            "runner-1", capabilities={"codex", "git", "build", "review"},
+        )
+        first = self.store.enqueue_job(
+            job_spec(self.task.task_id), job_id=uuid.uuid4().hex,
+        )
+        repair_spec = {**job_spec(self.task.task_id), "kind": "REPAIR"}
+        second = self.store.enqueue_job(
+            repair_spec, job_id=uuid.uuid4().hex,
+        )
+
+        claimed = self.store.claim_job("runner-1")
+
+        self.assertEqual(claimed["job_id"], first["job_id"])
+        self.assertIsNone(self.store.claim_job("runner-1"))
+        self.assertEqual(
+            self.store.get_job(second["job_id"])["status"],
+            JobStatus.PENDING.value,
+        )

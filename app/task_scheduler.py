@@ -189,6 +189,8 @@ def _sync_task_result(
                 "plan": workflow.get("plan", {}),
                 "workspace_audit": workflow.get("workspace_audit", {}),
                 "coder_report": workflow.get("coder_report", {}),
+                "coder_model": workflow.get("coder_model", ""),
+                "coder_provider": workflow.get("coder_provider", ""),
                 "blocked_stage": workflow.get("blocked_stage", ""),
             },
         )
@@ -654,15 +656,11 @@ def _reconcile_pull_runner_jobs(store: TaskStore) -> None:
             continue
         job = store.get_job(str(job_id))
         if job is None:
-            spec = task.metadata.get("runner_job_spec")
-            if isinstance(spec, dict):
-                try:
-                    store.enqueue_job(spec, job_id=str(job_id), priority=task.priority)
-                    continue
-                except (RuntimeError, ValueError, KeyError) as error:
-                    result_detail = f"Reserved PostgreSQL runner job could not be restored: {error}"
-            else:
-                result_detail = "Reserved PostgreSQL runner job is missing its saved specification."
+            result_detail = (
+                "Reserved PostgreSQL runner job is missing from durable storage. "
+                "The previous process state cannot be proven; inspect the runner "
+                "and workspace before dispatching another attempt."
+            )
             result_status = JobStatus.UNCERTAIN.value
             job = {"kind": task.metadata.get("runner_job_kind", "unknown")}
         else:
@@ -674,6 +672,18 @@ def _reconcile_pull_runner_jobs(store: TaskStore) -> None:
             continue
         metadata = {
             **task.metadata,
+            **(
+                {
+                    "uncertain_runner_job": {
+                        "job_id": str(job_id),
+                        "kind": task.metadata.get("runner_job_kind", "unknown"),
+                        "job_spec": task.metadata.get("runner_job_spec"),
+                    },
+                }
+                if result_status == JobStatus.UNCERTAIN.value
+                and store.get_job(str(job_id)) is None
+                else {}
+            ),
             "last_runner_job": {
                 "job_id": job_id,
                 "kind": job.get("kind", "unknown"),
@@ -1530,12 +1540,16 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
                     store.enqueue_job(review_spec, job_id=review_job_id)
                 return
             review_job = store.get_job(str(review_job_id))
-            if review_job is None and isinstance(review_spec, dict):
-                review_job = store.enqueue_job(
-                    review_spec, job_id=str(review_job_id),
-                )
             if review_job is None:
-                raise RuntimeError("Reserved final-review runner job is missing")
+                metadata["uncertain_final_review_job"] = {
+                    "job_id": str(review_job_id),
+                    "job_spec": review_spec,
+                    "head_sha": details["head_sha"],
+                }
+                raise RuntimeError(
+                    "Reserved final-review runner job is missing; its execution "
+                    "state cannot be proven, so it will not be dispatched again"
+                )
             if review_job["status"] in {
                 JobStatus.PENDING.value, JobStatus.RUNNING.value,
             }:
