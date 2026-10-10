@@ -224,6 +224,7 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                     step_review = stack.enter_context(patch("app.graph.review_implementation", return_value=approved))
                     stack.enter_context(patch("app.graph.review_identity", return_value={"backend": "codex-cli", "provider": "codex-cli", "model": "codex-reviewer"}))
                     stack.enter_context(patch("app.graph.workspace_has_changes", return_value=False))
+                    stack.enter_context(patch("app.graph.candidate_tree_sha", return_value="d" * 40))
                     stack.enter_context(patch("app.graph.current_head", return_value="baseline-sha"))
                     stack.enter_context(patch("app.graph.commit_step", return_value="checkpoint-sha"))
                     stack.enter_context(patch("app.graph.finalize_checkpoint_history", return_value="final-sha"))
@@ -315,7 +316,8 @@ class OrchestrationIntegrationTests(unittest.TestCase):
         self.assertEqual(validation.call_count, 2)
         # The graph reviews the whole plan once, without a per-step review.
         self.assertEqual(step_review.call_count, 1)
-        self.assertEqual(final_review.call_count, 1)
+        # The independently approved published candidate is reused after green CI.
+        self.assertEqual(final_review.call_count, 0)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.agents.codex_cli import CodexCliError, run_structured_prompt
+from app.workspace import candidate_tree_sha
 
 
 ReviewStatus = Literal["approved", "changes_required"]
@@ -210,7 +211,36 @@ def review_implementation(
     baseline_sha: str | None = None,
     coder_report: dict | None = None,
     workspace_audit: dict | None = None,
+    previous_review: dict | None = None,
+    previous_review_tree_sha: str | None = None,
 ) -> ReviewResult:
+    diff = _branch_diff(workspace, baseline_sha=baseline_sha)
+    if previous_review and previous_review_tree_sha:
+        try:
+            diff = _run_git(workspace, [
+                "diff", "--no-ext-diff", previous_review_tree_sha,
+                candidate_tree_sha(workspace), "--", ".",
+            ]) or "No changes since the previous review."
+        except (ReviewerError, RuntimeError):
+            # Old checkpoints may outlive unreferenced Git tree objects.
+            # Keep the full diff available rather than skipping a review.
+            pass
+    repair_rules = (
+        """
+- This is a focused repair verification. Check every previous blocking finding
+  and missing requirement, and inspect the repair diff for regressions.
+- Carry forward previous warnings/suggestions as TODOs; do not reopen settled
+  design choices or repeat repository/source discovery.
+- A newly discovered blocker needs a concrete example of materially incorrect
+  core behavior, data loss, or an omitted original must-have. Explain why it
+  blocks this task. Medium/minor edge cases remain TODOs.
+""" if previous_review else """
+- Complete the entire acceptance checklist in this single audit before returning.
+  Inspect date boundaries, revisions/idempotency, empty/error states and relevant
+  cross-step interactions together. Do not stop at the first blocker or reserve
+  findings for a later round. Report all actionable blockers as one repair batch.
+"""
+    ).strip()
     scope_rules = (
         """
 - Review the complete implementation across every plan step.
@@ -230,6 +260,13 @@ def review_implementation(
 """
     ).strip()
 
+    try:
+        changed_files = _run_git(workspace, [
+            "diff", "--name-only", f"{baseline_sha or 'origin/main'}..HEAD", "--", ".",
+        ]) + _run_git(workspace, ["status", "--short", "--untracked-files=all"])
+    except ReviewerError:
+        changed_files = "Inspect git diff/status in the workspace for the complete file list."
+
     task_reference = (
         f"task {abs(issue_number)}"
         if issue_number < 0
@@ -248,7 +285,10 @@ Approved implementation plan:
 {plan}
 
 Coder report (agent-authored, corroborate it against the diff and validation):
-{json.dumps(coder_report or {}, indent=2, sort_keys=True)}
+{_bounded_context(json.dumps(coder_report or {}, sort_keys=True), 12_000)}
+
+Previous review (verify this repair batch when present):
+{json.dumps(previous_review or {}, sort_keys=True)}
 
 Orchestrator-captured initial workspace audit (captured before planning or
 agent edits; authoritative for the original branch, commit, and initial
@@ -256,16 +296,23 @@ tracked/untracked status):
 {json.dumps(workspace_audit or {}, indent=2, sort_keys=True)}
 
 Validation output:
-{validation_output or "No validation output was supplied."}
+{_bounded_context(validation_output or "No validation output was supplied.", 12_000)}
 
 Git diff:
-{_branch_diff(workspace, baseline_sha=baseline_sha)}
+{_bounded_context(diff, 48_000)}
+
+Complete changed-file inventory (include omitted diff files in the audit):
+{changed_files}
 
 Review scope:
 {review_scope}
 
 Review rules:
 {scope_rules}
+{repair_rules}
+- Evidence excerpts may be abbreviated. Inspect omitted code with git diff and
+  repository files when needed; full logs remain in the task's captured evidence.
+- Keep the report concise and avoid repeating the issue, plan, or successful logs.
 - The review gate has two responsibilities:
   1. Confirm the supplied validation evidence is successful. Workflow routing
      sends code to review only after the configured validation gate passes;
@@ -275,8 +322,6 @@ Review rules:
      step and issue-level acceptance criterion; do not accept work deferred to
      a future task or issue.
 - Review only against the issue and approved plan.
-- Review only the active implementation step. Work assigned to later steps
-  is out of scope until those steps are active.
 - Use the orchestrator-captured workspace audit to verify initial checkout
   status and preservation claims. Do not demand historical evidence that the
   orchestrator captured directly before any agent ran.
@@ -289,6 +334,9 @@ Review rules:
   materially incorrect, unsafe, or violates an explicit acceptance criterion.
   Missing explicit plan work is also a gate failure. Do not mark medium or minor
   concerns as blocking.
+- Missing a substantial requested behavior blocks approval. Cosmetic wording,
+  optional hardening, speculative extremes, and documentation polish are TODOs
+  unless they prevent safe use of an explicitly requested core behavior.
 - Use `warning` or `suggestion` for non-critical improvements, including
   optional test expansion, maintainability, style, or follow-up work. These are
   recorded in the review comment and must not send the coder back.
@@ -318,6 +366,12 @@ Review rules:
     if not isinstance(result, ReviewResult):
         raise ReviewerError("Reviewer returned an unexpected response type.")
 
+    reported = {(finding.title, finding.file) for finding in result.findings}
+    for item in (previous_review or {}).get("findings", []):
+        finding = ReviewFinding.model_validate(item)
+        if finding.severity != "blocking" and (finding.title, finding.file) not in reported:
+            result.findings.append(finding)
+
     has_gate_failure = bool(result.missing_requirements) or any(
         finding.severity == "blocking"
         for finding in result.findings
@@ -325,6 +379,13 @@ Review rules:
     result.status = "changes_required" if has_gate_failure else "approved"
 
     return result
+
+
+def _bounded_context(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    half = limit // 2
+    return value[:half] + "\n... <excerpt abbreviated; inspect full evidence> ...\n" + value[-half:]
 
 
 def review_to_markdown(review: ReviewResult) -> str:

@@ -34,23 +34,29 @@ GitHub issue or direct task prompt
 → draft pull request
 → wait for GitHub Actions without holding a worker slot
 → repair CI failures and push an update
-→ final independent review
+→ reuse independent approval for the unchanged reviewed commit
 → READY or BLOCKED
 ```
 
-The executable workflow currently defaults to the legacy multi-step graph.
-`WORKFLOW_MODE=simplified` keeps a few coherent implementation steps. Each
+The executable workflow defaults to `WORKFLOW_MODE=simplified`, keeping a few
+coherent implementation steps. Legacy checkpoints retain their saved mode. Each
 step passes formatting and relevant unit tests before its commit; a failed
 later step preserves earlier successful commits. Full validation and one
-independent whole-plan review gate publication of one PR with those commits. Migration details are described in
+independent whole-plan review gate publication of one PR with those commits.
+The reviewer reports all blockers together; the coder repairs the entire batch.
+Follow-up review checks the repair diff and previous findings. Warnings and
+suggestions remain visible TODOs and do not create coding loops. Step commits
+stay local until the complete candidate is published. Migration details are described in
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Quick start
 
 GitHub issues with the configured ready label are checked against
-[`docs/issue-contract.md`](docs/issue-contract.md) before they are queued. An
-invalid issue receives a comment explaining the missing information; its ready
-label remains in place, and no workspace or Codex process is started.
+[`docs/issue-contract.md`](docs/issue-contract.md) before they are queued. A
+basic prompt is formatted automatically, preserving the original request and
+adding no product requirements. Only genuinely unusable input receives an
+intake warning before dispatch. Tasks wait in the persisted queue until runner
+capacity and Codex quota permit execution.
 
 Queue an issue or a direct task:
 
@@ -103,7 +109,13 @@ the current evidence and remaining gates, and
 migration rationale.
 
 With `MAC_SSH_TARGET` configured, whole-plan final review runs on the Mac
-runner against the exact open PR head. The scheduler polls READY tasks and
+runner. Approval is bound to the reviewed Git tree and then to the finalized
+commit; publication is refused if the files changed after review. When CI is
+green on that same PR head, the scheduler reuses the approval without another
+Codex call. Changed heads or legacy records without this evidence receive an
+independent review. CI repairs require green checks and a focused review of
+their changes; up to three CI repair rounds remain allowed.
+The scheduler polls READY tasks and
 records completion only after it observes that you merged the task PR and CI on
 the merge commit succeeds; it then closes the linked issue. For a manual merge
 made before scheduler tracking,

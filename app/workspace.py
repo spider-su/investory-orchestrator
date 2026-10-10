@@ -3,11 +3,21 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from collections.abc import Iterable
 from pathlib import Path
 
 from app.github_client import GitHubAppClient
+
+
+def candidate_tree_sha(workspace: Path) -> str:
+    """Snapshot publishable files without changing the checkout's real index."""
+    with tempfile.TemporaryDirectory(prefix="orchestrator-review-index-") as directory:
+        environment = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index")}
+        _run(["git", "read-tree", "HEAD"], cwd=workspace, env=environment)
+        _run(["git", "add", "-A", "--", "."], cwd=workspace, env=environment)
+        return _run(["git", "write-tree"], cwd=workspace, env=environment).strip()
 
 
 def _run(
