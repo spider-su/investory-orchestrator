@@ -369,17 +369,20 @@ After all steps are checkpointed:
 7. Mark the implementation graph completed only after the PR operation succeeds.
 8. Stop the Dev Container environment.
 9. The task scheduler records `WAITING_CI`, freeing its worker slot.
-10. Poll commit statuses and check runs. A failed check feeds its recorded
-    output into the bounded whole-plan repair path; repair is validated,
-    reviewed, pushed, and checked again.
+10. Poll commit statuses and check runs. On failure, collect every failed
+    check-run summary and its GitHub annotations, including file path, line and
+    column range, diagnostic, and source link. Feed all of them to the coder;
+    validate and push each repair, then check CI again. Allow at most three CI
+    repair rounds by default, limited by the task-wide `MAX_REPAIRS` budget.
 11. After CI is green, run a fresh whole-plan review against the final PR diff.
     Require a known reviewer identity distinct from the coder before marking
     the task `READY`.
 
-CI repair and final-review repair share the `CI_RETRY_ATTEMPTS` limit. Exhausted
-repairs remain `BLOCKED` with CI output or review findings attached to task
-metadata. Infrastructure failures also block without consuming an agent repair
-attempt.
+CI repair uses `CI_RETRY_ATTEMPTS` (default 3); final-review repair also uses
+that configured limit, with the simplified workflow's implementation-round
+cap applied separately. Exhausted repairs remain `BLOCKED` with CI output,
+locations, or review findings attached to task metadata. Infrastructure
+failures also block without consuming an agent repair attempt.
 
 The scheduler never merges task PRs. It marks a task complete only after the
 human merge and successful post-merge CI are observed.

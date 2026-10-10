@@ -52,6 +52,18 @@ class PullRequestCiTests(unittest.TestCase):
             conclusion="failure",
             html_url="https://example.test/check/1",
             output=SimpleNamespace(title="tests failed", summary="trace", text=""),
+            get_annotations=Mock(return_value=[SimpleNamespace(
+                path="app/example.py",
+                start_line=17,
+                end_line=18,
+                start_column=3,
+                end_column=8,
+                annotation_level="failure",
+                title="Assertion failed",
+                message="Expected 4, received 2",
+                raw_details="assert result == 4",
+                blob_href="https://example.test/blob/1",
+            )]),
         )
         self.commit.get_check_runs.return_value = [check]
 
@@ -59,6 +71,9 @@ class PullRequestCiTests(unittest.TestCase):
 
         self.assertEqual(status, "failure")
         self.assertIn("trace", details[0]["output"])
+        self.assertEqual(len(details[0]["annotations"]), 1)
+        self.assertEqual(details[0]["annotations"][0]["path"], "app/example.py")
+        self.assertEqual(details[0]["annotations"][0]["start_line"], 17)
 
     def test_pull_request_closing_keyword_links_issue(self) -> None:
         self.assertTrue(GitHubAppClient.pull_request_closes_issue(

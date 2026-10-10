@@ -212,6 +212,65 @@ def _record_activity_changes(
                            message=reason, metadata={"stage": current.get("blocked_stage", "")})
 
 
+def _format_ci_repair_feedback(details: list[dict[str, Any]]) -> str:
+    """Build complete, location-specific repair instructions from failed checks."""
+    failures: list[str] = []
+    for check in details:
+        if check.get("conclusion") in {"success", "skipped", "neutral"}:
+            continue
+        section = [
+            f"## {check.get('name', 'Unnamed check')} — "
+            f"{check.get('conclusion', check.get('status', 'failed'))}",
+        ]
+        if check.get("url"):
+            section.append(f"Check run: {check['url']}")
+        if check.get("output"):
+            section.append("Check output:\n" + str(check["output"]))
+        annotations = check.get("annotations", [])
+        if annotations:
+            section.append("Exact annotated failure locations:")
+            for annotation in annotations:
+                location = str(annotation.get("path") or "<no file path>")
+                start = annotation.get("start_line")
+                end = annotation.get("end_line")
+                if start is not None:
+                    location += f":{start}"
+                    if end is not None and end != start:
+                        location += f"-{end}"
+                start_column = annotation.get("start_column")
+                end_column = annotation.get("end_column")
+                if start_column is not None:
+                    location += f":{start_column}"
+                    if end_column is not None and end_column != start_column:
+                        location += f"-{end_column}"
+                description = " — ".join(
+                    str(value)
+                    for value in (
+                        annotation.get("level", ""),
+                        annotation.get("title", ""),
+                        annotation.get("message", ""),
+                    )
+                    if value
+                )
+                line = f"- {location}"
+                if description:
+                    line += f" — {description}"
+                if annotation.get("url"):
+                    line += f" ({annotation['url']})"
+                section.append(line)
+                if annotation.get("raw_details"):
+                    section.append(f"  Details: {annotation['raw_details']}")
+        elif check.get("annotation_error"):
+            section.append(str(check["annotation_error"]))
+        else:
+            section.append(
+                "GitHub provided no file annotations for this failed check; "
+                "use the check output and run URL above."
+            )
+        failures.append("\n".join(section))
+    return "\n\n".join(failures)
+
+
 def run_cli(
     *,
     build_graph: GraphFactory,
@@ -473,15 +532,17 @@ def run_cli(
             ):
                 raise RuntimeError("No CI or final-review repair is saved for this task.")
             details = task.metadata.get("ci_details", [])
-            output = "\n".join(
-                f"{item.get('name')}: {item.get('conclusion')} "
-                f"{item.get('url')}\n{item.get('output', '')}"
-                for item in details
-                if task.ci_status == "failed"
-                and item.get("conclusion") not in {"success", "skipped", "neutral"}
-            )
+            output_parts = []
+            if task.ci_status == "failed":
+                ci_feedback = _format_ci_repair_feedback(details)
+                output_parts.append(
+                    ci_feedback or "CI checks failed; inspect the linked checks."
+                )
             if task.metadata.get("final_review_status") == "changes_required":
-                output = task.metadata.get("final_review_feedback", output)
+                review_feedback = task.metadata.get("final_review_feedback", "")
+                if review_feedback:
+                    output_parts.append("## Reviewer findings\n" + review_feedback)
+            output = "\n\n".join(output_parts)
             if not output:
                 output = "CI checks failed; inspect the linked checks."
             graph.update_state(
