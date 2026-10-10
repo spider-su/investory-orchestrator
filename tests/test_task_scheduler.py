@@ -870,13 +870,21 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertIn("--ci-repair", command)
         self.assertEqual(self.store.get(task.task_id).status, TaskStatus.IMPLEMENTING)
 
-    def test_exhausted_repair_attempts_are_not_dispatched(self) -> None:
+    def test_third_ci_repair_dispatches_but_exhausted_repairs_do_not(self) -> None:
         ci_task = self.store.create(title="exhausted CI")
         self.store.transition(
             ci_task.task_id,
             TaskStatus.BLOCKED,
             ci_status="failed",
-            ci_attempts=1,
+            ci_attempts=4,
+            implementation_attempts=2,
+        )
+        third_ci_repair = self.store.create(title="third CI repair")
+        self.store.transition(
+            third_ci_repair.task_id,
+            TaskStatus.BLOCKED,
+            ci_status="failed",
+            ci_attempts=3,
             implementation_attempts=2,
         )
         review_task = self.store.create(title="exhausted review")
@@ -891,13 +899,19 @@ class TaskSchedulerTests(unittest.TestCase):
         )
         with (
             patch.dict(os.environ, {"CI_RETRY_ATTEMPTS": "3"}),
-            patch("app.task_scheduler.subprocess.Popen") as popen,
+            patch("app.task_scheduler.subprocess.Popen", return_value=SimpleNamespace(
+                pid=987658, wait=lambda: 0,
+            )) as popen,
             patch("app.task_scheduler._poll_ready_issues"),
             patch("app.task_scheduler._poll_ci"),
         ):
             run_queue(self.store, once=True)
 
-        popen.assert_not_called()
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(
+            self.store.get(third_ci_repair.task_id).status,
+            TaskStatus.IMPLEMENTING,
+        )
         self.assertEqual(self.store.get(ci_task.task_id).status, TaskStatus.BLOCKED)
         self.assertEqual(self.store.get(review_task.task_id).status, TaskStatus.BLOCKED)
 

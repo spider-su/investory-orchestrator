@@ -35,7 +35,7 @@ MAX_ATTEMPTS=2
 MAX_REPAIRS=3
 WORKFLOW_MODE=simplified
 MAX_FINAL_ATTEMPTS=1
-CI_RETRY_ATTEMPTS=1
+CI_RETRY_ATTEMPTS=3
 MAX_ACTIVE_TASKS=3
 MAX_CODEX_PROCESSES=2
 MAX_BUILDS=1
@@ -61,6 +61,12 @@ compatibility only.
 local validation/review and CI/final-review repair. The limit and usage are
 persisted in task metadata; infrastructure failures that produce no candidate
 refund the reservation. CI polling and runner health retries do not consume it.
+
+Each red CI result is saved with all failed check-run summaries and GitHub
+annotations. Annotations retain their repository path, line/column range,
+diagnostic, and source link; the coder receives every failed check and location
+on a repair run. CI can trigger at most three repair rounds by default, further
+limited by `MAX_REPAIRS`.
 
 Task status reports one of six lifecycle states. The dashboard shows the
 separate execution phase (preparing, implementing, validating, reviewing,
