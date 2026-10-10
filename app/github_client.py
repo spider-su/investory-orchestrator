@@ -516,7 +516,7 @@ class GitHubAppClient:
             conclusion = (check.conclusion or "").lower()
             status = (check.status or "").lower()
             output = getattr(check, "output", None)
-            results.append({
+            result = {
                 "name": check.name,
                 "status": status,
                 "conclusion": conclusion,
@@ -530,7 +530,35 @@ class GitHubAppClient:
                     )
                     if part
                 )[-20_000:],
-            })
+                "annotations": [],
+            }
+            if status == "completed" and conclusion not in {
+                "success", "skipped", "neutral",
+            }:
+                get_annotations = getattr(check, "get_annotations", None)
+                if get_annotations:
+                    try:
+                        result["annotations"] = [
+                            {
+                                "path": getattr(item, "path", "") or "",
+                                "start_line": getattr(item, "start_line", None),
+                                "end_line": getattr(item, "end_line", None),
+                                "start_column": getattr(item, "start_column", None),
+                                "end_column": getattr(item, "end_column", None),
+                                "level": getattr(item, "annotation_level", "") or "",
+                                "title": getattr(item, "title", "") or "",
+                                "message": getattr(item, "message", "") or "",
+                                "raw_details": getattr(item, "raw_details", "") or "",
+                                "url": getattr(item, "blob_href", "") or "",
+                            }
+                            for item in get_annotations()
+                        ]
+                    except GithubException as error:
+                        result["annotation_error"] = (
+                            "Unable to retrieve check annotations: "
+                            f"{error.status} {error.data}"
+                        )
+            results.append(result)
             if status != "completed":
                 pending = True
             elif conclusion not in {"success", "skipped", "neutral"}:

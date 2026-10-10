@@ -193,6 +193,24 @@ class CliTests(unittest.TestCase):
                         "conclusion": "failure",
                         "url": "https://example.test/check/1",
                         "output": "assertion failed",
+                        "annotations": [{
+                            "path": "tests/test_profile.py",
+                            "start_line": 42,
+                            "end_line": 42,
+                            "start_column": 5,
+                            "end_column": 12,
+                            "level": "failure",
+                            "title": "Wrong value",
+                            "message": "Expected active, got inactive",
+                            "raw_details": "assert profile.status == 'active'",
+                            "url": "https://example.test/blob/test_profile.py#L42",
+                        }],
+                    }, {
+                        "name": "integration",
+                        "conclusion": "failure",
+                        "url": "https://example.test/check/2",
+                        "output": "connection timeout",
+                        "annotations": [],
                     }]
                 },
             )
@@ -210,6 +228,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(as_node, "prepare_final_review")
         self.assertTrue(updates["ci_repair_requested"])
         self.assertIn("assertion failed", updates["final_validation_output"])
+        self.assertIn("tests/test_profile.py:42:5-12", updates["final_validation_output"])
+        self.assertIn("Expected active, got inactive", updates["final_validation_output"])
+        self.assertIn("## integration — failure", updates["final_validation_output"])
+        self.assertIn("connection timeout", updates["final_validation_output"])
 
 
 if __name__ == "__main__":

@@ -160,6 +160,9 @@ Instructions:
   implementation details for every blocking finding, then rerun the relevant
   tests. Keep non-critical findings as comments; do not spend another round
   debating them.
+- For a CI repair, address every failed check in the supplied report, including
+  each annotated file, line, column, and diagnostic. Do not stop after fixing
+  only the first failure; rerun the relevant local checks before returning.
 - A step may be completed without code changes when its requirements are
   already satisfied or prior evidence shows there is no safe, in-scope change
   to make. Record that conclusion and preserve uncertain items instead of

@@ -826,14 +826,13 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
             task for task in store.list({TaskStatus.QUEUED})
             if task.repository in repositories
         ]
-        retry_limit = min(1, max(0, int(os.getenv("CI_RETRY_ATTEMPTS", "1"))))
+        retry_limit = min(3, max(0, int(os.getenv("CI_RETRY_ATTEMPTS", "3"))))
         candidates.extend(
             task for task in store.list({TaskStatus.BLOCKED})
             if task.repository in repositories and (
                 (
                     task.ci_status == "failed"
                     and task.ci_attempts <= retry_limit
-                    and task.implementation_attempts < 2
                 ) or (
                     task.metadata.get("final_review_status") == "changes_required"
                     and task.metadata.get("final_review_repairs", 0) <= retry_limit
