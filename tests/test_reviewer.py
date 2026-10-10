@@ -138,6 +138,8 @@ class ReviewerTests(unittest.TestCase):
         self.assertIn("branch diff text", kwargs["prompt"])
         self.assertIn("Do not report", kwargs["prompt"])
         self.assertIn("later planned steps as context", kwargs["prompt"])
+        self.assertIn("two responsibilities", kwargs["prompt"])
+        self.assertIn("must not send the coder back", kwargs["prompt"])
 
     def test_review_receives_orchestrator_evidence_and_coder_report(self) -> None:
         with patch(
@@ -191,6 +193,43 @@ class ReviewerTests(unittest.TestCase):
                     file="app/test_reviewer.py",
                     recommendation="Add a focused test.",
                 )]
+            )
+        )
+        self.assertEqual(review.status, "changes_required")
+
+    def test_review_approves_when_only_noncritical_findings_exist(self) -> None:
+        review, _ = self._run_review(
+            build_review(
+                status="changes_required",
+                findings=[
+                    ReviewFinding(
+                        severity="warning",
+                        title="Optional rejection coverage",
+                        description="More cases could be covered.",
+                        recommendation="Consider adding edge case tests.",
+                    ),
+                    ReviewFinding(
+                        severity="suggestion",
+                        title="Naming cleanup",
+                        description="A helper name could be clearer.",
+                        recommendation="Consider renaming the helper.",
+                    ),
+                ],
+            )
+        )
+        self.assertEqual(review.status, "approved")
+
+    def test_review_keeps_explicit_missing_plan_work_as_gate_failure(self) -> None:
+        review, _ = self._run_review(
+            build_review(
+                status="approved",
+                missing_requirements=["Implement planned importer."],
+                findings=[ReviewFinding(
+                    severity="warning",
+                    title="Optional coverage",
+                    description="Additional cases may help.",
+                    recommendation="Consider another test.",
+                )],
             )
         )
         self.assertEqual(review.status, "changes_required")

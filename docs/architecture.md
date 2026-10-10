@@ -210,6 +210,14 @@ Automated review has two separate layers:
 2. **LLM review** evaluates the validated diff against the issue, plan, scope,
    acceptance criteria, repository rules, and validation output.
 
+The implementation gate has two responsibilities: deterministic validation and
+GitHub Actions must be green, and the developer must implement every explicit
+issue and approved-plan item before completion. The reviewer may return work to
+the coder for an unmet in-scope requirement or a critical correctness or safety
+defect. Medium and minor findings remain visible as warnings or suggestions in
+the issue or PR review comment; they do not start another coder pass by
+themselves.
+
 An LLM review may be called **independent** only when all of these conditions
 hold:
 
