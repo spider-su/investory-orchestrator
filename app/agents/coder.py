@@ -160,6 +160,11 @@ Instructions:
   implementation details for every blocking finding, then rerun the relevant
   tests. Keep non-critical findings as comments; do not spend another round
   debating them.
+- Address the entire blocking batch before returning. Preserve working code
+  and earlier validated increments; do not repeat unrelated discovery or fixes.
+- Keep summaries concise and cite commands/results rather than copying full
+  successful logs. Add meaningful regression tests for behavior changes, not
+  tests that merely repeat the implementation.
 - For a CI repair, address every failed check in the supplied report, including
   each annotated file, line, column, and diagnostic. Do not stop after fixing
   only the first failure; rerun the relevant local checks before returning.

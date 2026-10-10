@@ -165,6 +165,13 @@ the current step's baseline, retaining earlier successful commits. Repair
 limits still apply, including the task-wide repair budget. Review repairs
 receive concrete proposals and ordered file, behavior, and test details.
 
+The first whole-plan review audits the complete acceptance checklist and returns
+all blockers in one batch. Repair verification compares the previous reviewed
+Git tree with the repaired candidate and carries warnings/suggestions as TODOs.
+Reviewer prompts contain bounded log/diff excerpts; omitted source remains
+available in the workspace and full validation logs remain in persisted evidence.
+The real Git index is never changed when capturing candidate trees.
+
 Validated step commits remain in the single task PR. An approved integration
 repair adds a commit on top of them. Existing saved plans are retained as-is;
 a previously consolidated plan is not reconstructed or replanned on resume.
@@ -373,7 +380,9 @@ After all steps are checkpointed:
 1. Run final whole-plan validation.
 2. Run final whole-plan review.
 3. Perform bounded integration repair when required.
-4. Replace checkpoint history with the final logical commit.
+4. Preserve validated step commits in simplified mode (legacy mode replaces
+   checkpoint history with one logical commit). Verify the final tree still
+   matches the validated, independently reviewed files; bind approval to its SHA.
 5. Push `agent/issue-<number>`.
 6. Reuse an existing open PR for that branch, or create a draft PR.
 7. Mark the implementation graph completed only after the PR operation succeeds.
@@ -384,9 +393,11 @@ After all steps are checkpointed:
     column range, diagnostic, and source link. Feed all of them to the coder;
     validate and push each repair, then check CI again. Allow at most three CI
     repair rounds by default, limited by the task-wide `MAX_REPAIRS` budget.
-11. After CI is green, run a fresh whole-plan review against the final PR diff.
-    Require a known reviewer identity distinct from the coder before marking
-    the task `READY`.
+11. After CI is green on the same published SHA, reuse the independent approval
+    and mark the task `READY`. Changed heads or legacy evidence without a bound
+    approval receive independent review. CI repairs are validated and receive
+    focused repair verification before pushing again. Reviewer identity must be
+    known and distinct from the coder; missing or stale evidence cannot be reused.
 
 CI repair uses `CI_RETRY_ATTEMPTS` (default 3); final-review repair also uses
 that configured limit, with the simplified workflow's implementation-round

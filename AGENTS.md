@@ -97,6 +97,12 @@ Reviewer returns either:
 
 Blocking findings must result in `changes_required`.
 
+Audit all acceptance criteria in one pass and report every actionable blocker
+together, with concrete file, behavior, and test details. Only materially
+incorrect core behavior, data loss, regressions, or missing substantial requested
+behavior block approval. Medium/minor concerns remain visible TODOs. Follow-up
+review verifies the repair batch and its diff; it does not restart discovery.
+
 ---
 
 # Orchestrator
@@ -141,6 +147,12 @@ The orchestrator:
 - supports resume
 - posts GitHub comments when blocked
 - creates draft pull requests after successful completion
+
+Simplified mode validates and commits each step locally, then performs one
+independent whole-plan audit before publishing the complete branch. All blockers
+are repaired as one batch. Approval is bound to the validated files and published
+commit. Green CI on that unchanged commit permits READY without a second Codex
+review. CI failures receive exact diagnostics and at most three repair rounds.
 
 ---
 

@@ -89,6 +89,8 @@ def run_review_job(job_id: str, attempt_id: str) -> int:
         baseline_sha=request.get("baseline_sha") or None,
         coder_report=request.get("coder_report"),
         workspace_audit=request.get("workspace_audit"),
+        previous_review=request.get("previous_review"),
+        previous_review_tree_sha=request.get("previous_review_tree_sha"),
     )
     result = {
         "task_id": spec["task_id"],

@@ -55,9 +55,15 @@ class WorkflowState(TypedDict):
     final_validation_status: ValidationStatus
     final_validation_exit_code: int
     final_validation_output: str
+    final_validation_tree_sha: str
     final_review_status: ReviewStatus
     final_review: dict[str, Any]
     final_review_error: str
+    final_review_tree_sha: str
+    final_review_head_sha: str
+    final_review_clean_worktree: bool
+    previous_review: dict[str, Any]
+    previous_review_tree_sha: str
     final_commit_sha: Optional[str]
     no_change_outcome: bool
 

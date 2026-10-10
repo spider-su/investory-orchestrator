@@ -50,6 +50,7 @@ from app.test_runner import (
     stop_environment,
 )
 from app.workspace import (
+    candidate_tree_sha,
     capture_workspace_audit,
     commit_step,
     concrete_affected_paths,
@@ -1438,9 +1439,15 @@ def prepare_final_review_node(state: WorkflowState) -> dict:
         "final_validation_status": "not_started",
         "final_validation_exit_code": 0,
         "final_validation_output": "",
+        "final_validation_tree_sha": "",
         "final_review_status": "not_started",
         "final_review": {},
         "final_review_error": "",
+        "previous_review": {},
+        "previous_review_tree_sha": "",
+        "final_review_tree_sha": "",
+        "final_review_head_sha": "",
+        "final_review_clean_worktree": False,
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -1473,6 +1480,7 @@ def final_validation_node(state: WorkflowState) -> dict:
             "final_validation_status": "validation_success",
             "final_validation_exit_code": 0,
             "final_validation_output": result["output"],
+            "final_validation_tree_sha": candidate_tree_sha(Path(state["workspace"])),
             "blocked_reason": "",
             "blocked_stage": "",
             "error": "",
@@ -1669,6 +1677,11 @@ def final_integration_coder_node(state: WorkflowState) -> dict:
         "final_review_status": "not_started",
         "final_review": {},
         "final_review_error": "",
+        "previous_review": state.get("final_review") or state.get("previous_review", {}),
+        "previous_review_tree_sha": state.get("final_review_tree_sha") or state.get("previous_review_tree_sha", ""),
+        "final_review_tree_sha": "",
+        "final_review_head_sha": "",
+        "final_review_clean_worktree": False,
         "blocked_reason": "",
         "blocked_stage": "",
         "error": "",
@@ -1695,6 +1708,9 @@ def final_reviewer_node(state: WorkflowState) -> dict:
     )
 
     try:
+        reviewed_tree = candidate_tree_sha(Path(state["workspace"]))
+        if state.get("final_validation_tree_sha") and state["final_validation_tree_sha"] != reviewed_tree:
+            raise ReviewerError("Candidate changed after final validation; rerun validation before review.")
         review = review_implementation(
             workspace=Path(state["workspace"]),
             issue_number=state["issue_number"],
@@ -1706,8 +1722,12 @@ def final_reviewer_node(state: WorkflowState) -> dict:
             baseline_sha=state["issue_baseline_sha"],
             coder_report=state.get("coder_report", {}),
             workspace_audit=state.get("workspace_audit", {}),
+            previous_review=state.get("previous_review") or None,
+            previous_review_tree_sha=state.get("previous_review_tree_sha") or None,
         )
-    except ReviewerError as error:
+        if candidate_tree_sha(Path(state["workspace"])) != reviewed_tree:
+            raise ReviewerError("Candidate changed during independent review; approval is invalid.")
+    except (ReviewerError, RuntimeError) as error:
         message = str(error)
         return {
             "final_review_status": "review_failure",
@@ -1729,6 +1749,7 @@ def final_reviewer_node(state: WorkflowState) -> dict:
         "workflow_status": "reviewing",
         "final_review_status": review.status,
         "final_review": review.model_dump(mode="json"),
+        "final_review_tree_sha": reviewed_tree,
         "final_review_error": "",
         "reviewer_backend": reviewer_info["backend"],
         "reviewer_provider": reviewer_info["provider"],
@@ -1961,8 +1982,18 @@ def finalize_history_node(state: WorkflowState) -> dict:
         }
 
     print(f"Final branch tip: {commit_sha}")
+    reviewed_tree = state.get("final_review_tree_sha", "")
+    clean = not workspace_has_changes(Path(state["workspace"])) if reviewed_tree else False
+    if reviewed_tree and (not clean or candidate_tree_sha(Path(state["workspace"])) != reviewed_tree):
+        message = "Finalized files differ from the independently reviewed candidate; refusing publication."
+        return {
+            "workflow_status": "blocked", "blocked_reason": message,
+            "blocked_stage": "finalize_history", "error": message,
+        }
     return {
         "final_commit_sha": commit_sha,
+        "final_review_head_sha": commit_sha if reviewed_tree else "",
+        "final_review_clean_worktree": clean,
         "commit_sha": commit_sha,
         "side_effect_intent": {},
         "side_effect_history": complete_intent(

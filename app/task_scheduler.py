@@ -140,7 +140,18 @@ def _sync_task_result(
             "workspace_audit": workflow.get("workspace_audit", {}),
             "final_validation_status": workflow.get("final_validation_status", ""),
             "final_validation_output": workflow.get("final_validation_output", ""),
+            "final_validation_tree_sha": workflow.get("final_validation_tree_sha", ""),
             "final_review_status": workflow.get("final_review_status", ""),
+            "final_review": workflow.get("final_review", {}),
+            "final_review_tree_sha": workflow.get("final_review_tree_sha", ""),
+            "final_review_head_sha": workflow.get("final_review_head_sha", ""),
+            "final_review_clean_worktree": workflow.get("final_review_clean_worktree", False),
+            "final_commit_sha": workflow.get("final_commit_sha", ""),
+            "final_review_identity": {
+                "backend": workflow.get("reviewer_backend", ""),
+                "provider": workflow.get("reviewer_provider", ""),
+                "model": workflow.get("reviewer_model", ""),
+            },
             "coder_model": workflow.get("coder_model", ""),
             "coder_provider": workflow.get("coder_provider", ""),
             "review_independence": workflow.get("review_independence", ""),
@@ -1461,6 +1472,57 @@ def reconcile_merged_task(store: TaskStore, task_id: str) -> Any:
     return completed
 
 
+def _reuse_published_review(store: TaskStore, task: Any, client: Any, head_sha: str) -> bool:
+    """Reuse an independent approval only for the identical published candidate."""
+    from app.agents.reviewer import review_classification
+
+    metadata = task.metadata
+    identity = metadata.get("final_review_identity") or {}
+    independence = review_classification(
+        metadata.get("coder_model", ""), identity.get("model", ""),
+        coder_provider=metadata.get("coder_provider", ""),
+        reviewer_provider=identity.get("provider", ""),
+    )
+    if not (
+        head_sha and metadata.get("final_review_head_sha") == head_sha
+        and metadata.get("final_commit_sha") == head_sha
+        and metadata.get("final_review_tree_sha")
+        and metadata.get("final_validation_tree_sha") == metadata.get("final_review_tree_sha")
+        and metadata.get("final_review_clean_worktree") is True
+        and metadata.get("final_review_status") == "approved"
+        and metadata.get("final_review", {}).get("status") == "approved"
+        and metadata.get("final_validation_status") == "validation_success"
+        and independence == "independent"
+        and task.pr_number and task.pr_url
+    ):
+        return False
+    # Bind CI to the same SHA, even if the PR changed between polling and review.
+    ci_state, details = client.get_commit_ci(head_sha)
+    if ci_state != "success":
+        store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED if ci_state == "failure" else TaskStatus.WAITING_CI,
+            ci_status="failed" if ci_state == "failure" else "pending",
+            ci_attempts=task.ci_attempts + (ci_state == "failure"),
+            blocked_reason="CI failed on the reviewed commit; repair required." if ci_state == "failure" else "",
+            metadata={**metadata, "ci_details": details, "post_ci_review": False},
+        )
+        return True
+    store.transition(
+        task.task_id, TaskStatus.READY, ci_status="green", blocked_reason="",
+        metadata={
+            **metadata, "ci_details": details, "post_ci_review": False,
+            "final_review_independence": independence,
+            "review_reused_for_head": head_sha,
+            "ready_gates": {
+                "pull_request": True, "local_validation": True,
+                "ci_green": True, "independent_review": True, "clean_worktree": True,
+            },
+        },
+    )
+    return True
+
+
 def _run_final_review(store: TaskStore, task: Any) -> None:
     from pathlib import Path
 
@@ -1496,6 +1558,8 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
                 )
             if details["head_ref"] != task.branch:
                 raise RuntimeError("PR head branch does not match the task branch")
+            if _reuse_published_review(store, task, client, details["head_sha"]):
+                return
         else:
             details = {"head_sha": "", "head_ref": task.branch}
         if not task.workspace:
@@ -1515,6 +1579,8 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
             "baseline_sha": metadata.get("issue_baseline_sha"),
             "coder_report": metadata.get("coder_report"),
             "workspace_audit": metadata.get("workspace_audit"),
+            "previous_review": metadata.get("final_review") if metadata.get("final_review_tree_sha") else None,
+            "previous_review_tree_sha": metadata.get("final_review_tree_sha") or None,
         }
         if pull_review:
             review_job_id = metadata.get("final_review_job_id")
@@ -1664,6 +1730,8 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
                 baseline_sha=request["baseline_sha"] or None,
                 coder_report=request["coder_report"],
                 workspace_audit=request["workspace_audit"],
+                previous_review=request["previous_review"],
+                previous_review_tree_sha=request["previous_review_tree_sha"],
             )
             review_data = review.model_dump(mode="json")
             reviewer = review_identity()

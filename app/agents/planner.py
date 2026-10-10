@@ -155,6 +155,12 @@ Planning rules:
   must happen before edits. State explicitly that the workspace must remain
   unchanged and identify the evidence to report.
 - Every step must have concrete acceptance criteria.
+- Treat the original prompt as the product contract. Turn its requested outcomes
+  into a compact acceptance checklist; do not expand it with production-grade
+  hardening, optional polish, or speculative edge cases.
+- Map each acceptance criterion to the implementation area and its meaningful
+  test/evidence in the step validation list. Group related boundary cases so
+  one whole-plan audit can check them together.
 - Every step must specify how it will be validated.
 - List exact repository-relative files or directories in affected areas; do
   not use narrative labels as if they were filesystem paths. Use an empty list

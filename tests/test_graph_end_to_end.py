@@ -260,6 +260,9 @@ class GraphEndToEndTests(unittest.TestCase):
                     patch("app.graph.workspace_has_changes", return_value=False)
                 )
                 stack.enter_context(
+                    patch("app.graph.candidate_tree_sha", return_value="d" * 40)
+                )
+                stack.enter_context(
                     patch("app.graph.current_head", return_value="baseline-sha")
                 )
                 stack.enter_context(
