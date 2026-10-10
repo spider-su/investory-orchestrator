@@ -282,6 +282,8 @@ class ReviewerTests(unittest.TestCase):
                 description="Only one role is exercised.",
                 file="tests/test_reviewer.py",
                 recommendation="Cover all agent roles.",
+                concrete_proposal="Add a separate reviewer prompt test.",
+                implementation_details=["Update the fixture and assert the prompt text."],
             )],
         )
         markdown = review_to_markdown(review)
@@ -291,6 +293,8 @@ class ReviewerTests(unittest.TestCase):
         self.assertIn("### Requirements satisfied", markdown)
         self.assertIn("### Missing requirements", markdown)
         self.assertIn("**WARNING: Narrow validation**", markdown)
+        self.assertIn("Proposal: Add a separate reviewer prompt test.", markdown)
+        self.assertIn("Next-round detail: Update the fixture", markdown)
         self.assertIn("### Validation reviewed", markdown)
 
 

@@ -159,16 +159,16 @@ approval of the current step.
 implementation step. It preserves the union of the planner's requirements,
 acceptance criteria, validation commands, affected areas, and exclusions, then
 runs the existing coder and deterministic validation. Per-step review is
-skipped; the independent final review still gates publication. This reduces a
-multi-step task to one initial coding pass, plus bounded validation or final
-review repair calls, without changing the scheduler or checkpoint contract.
+skipped; the independent final review still gates publication. The task gets
+at most two coder rounds total: an initial implementation and one repair round.
+The repair round receives the concrete change proposal and ordered file,
+behavior, and test details from review. A second failed review or validation
+blocks with its diagnostics; it cannot start a third coder round.
 
-The planner remains a separate read-only Codex invocation in this migration
-slice. The mode defaults to `legacy`; select `simplified` for new tasks after
-reviewing the behavior. The chosen mode is stored in task checkpoints and
-runner job configuration. Checkpoints created before this setting existed
-continue using the legacy route. Existing in-flight workflows are therefore
-not silently migrated.
+The planner remains a separate read-only Codex invocation. The chosen mode is
+stored in task checkpoints and runner job configuration. Checkpoints created
+before this setting existed continue using the legacy route; existing
+in-flight workflows are not silently migrated.
 
 When a plan lists concrete repository-relative paths, the checkpoint commit
 enforces that path scope. Narrative descriptions are not treated as paths; the
@@ -214,9 +214,10 @@ The implementation gate has two responsibilities: deterministic validation and
 GitHub Actions must be green, and the developer must implement every explicit
 issue and approved-plan item before completion. The reviewer may return work to
 the coder for an unmet in-scope requirement or a critical correctness or safety
-defect. Medium and minor findings remain visible as warnings or suggestions in
-the issue or PR review comment; they do not start another coder pass by
-themselves.
+defect. Every blocker must include a concrete proposal and ordered
+implementation/test details. Medium and minor findings remain visible as
+warnings or suggestions in the issue or PR review comment; they do not start
+another coder pass by themselves.
 
 An LLM review may be called **independent** only when all of these conditions
 hold:

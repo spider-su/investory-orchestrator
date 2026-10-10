@@ -136,7 +136,11 @@ Repository context:
 
 Planning rules:
 - Answer repository-specific questions from the supplied repository context.
-- Ask the user only about product decisions that cannot be inferred safely.
+- Resolve routine technical decisions from repository conventions and prefer
+  the smallest safe implementation. Do not ask about formatting or details
+  discoverable from the repository.
+- Add an open question only for a material product, security, or data-loss
+  decision that cannot be safely inferred and blocks implementation.
 - Separate product requirements from technical details.
 - Do not invent behavior that is not supported by the issue.
 - Record uncertain assumptions explicitly.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.issue_validation import validate_issue_contract
+from app.issue_validation import format_issue_contract, validate_issue_contract
 
 
 VALID_ISSUE = """## Goal
@@ -75,6 +75,32 @@ class IssueValidationTests(unittest.TestCase):
         result = validate_issue_contract("Fix task result", body, ["bug"])
 
         self.assertTrue(result.valid, result.errors)
+
+    def test_formats_unstructured_request_and_preserves_original_text(self) -> None:
+        original = "Please add a compact VIX panel to Market Radar."
+        formatted = format_issue_contract("Add VIX context", original)
+
+        self.assertNotEqual(formatted, original)
+        self.assertIn("## Goal", formatted)
+        self.assertIn("## Acceptance criteria", formatted)
+        self.assertIn("## Original issue description\n" + original, formatted)
+        self.assertTrue(validate_issue_contract("Add VIX context", formatted).valid)
+
+    def test_formatter_is_idempotent_and_uses_title_for_blank_description(self) -> None:
+        formatted = format_issue_contract("Add VIX context", "Add a VIX panel.")
+        self.assertEqual(format_issue_contract("Add VIX context", formatted), formatted)
+        blank_body = format_issue_contract("Add VIX context", "")
+        self.assertIn("use the issue title as the request", blank_body)
+        self.assertTrue(validate_issue_contract("Add VIX context", blank_body).valid)
+        self.assertEqual(format_issue_contract("", ""), "")
+
+    def test_formats_malformed_bug_issue_without_rejecting_it(self) -> None:
+        original = "The radar page crashes when opened."
+        formatted = format_issue_contract("Fix radar crash", original, ["bug"])
+
+        result = validate_issue_contract("Fix radar crash", formatted, ["bug"])
+        self.assertTrue(result.valid, result.errors)
+        self.assertIn("## Reproduction", formatted)
 
 
 if __name__ == "__main__":

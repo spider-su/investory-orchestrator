@@ -156,6 +156,10 @@ Instructions:
 - Treat accepted results from completed steps as available evidence and build
   on them. Do not ask the user to provide findings, files, or evidence already
   present in the issue, approved plan, completed-step results, or repository.
+- On a repair round, implement the reviewer's concrete proposal and ordered
+  implementation details for every blocking finding, then rerun the relevant
+  tests. Keep non-critical findings as comments; do not spend another round
+  debating them.
 - A step may be completed without code changes when its requirements are
   already satisfied or prior evidence shows there is no safe, in-scope change
   to make. Record that conclusion and preserve uncertain items instead of

@@ -20,7 +20,7 @@ from app.agents.reviewer import (
     review_identity,
     review_implementation,
 )
-from app.issue_validation import validate_issue_contract
+from app.issue_validation import format_issue_contract, validate_issue_contract
 from app.tasks import JobKind, JobStatus, TaskPhase, TaskStatus, TaskStore
 
 
@@ -826,16 +826,18 @@ def run_queue(store: TaskStore, *, once: bool = False) -> None:
             task for task in store.list({TaskStatus.QUEUED})
             if task.repository in repositories
         ]
-        retry_limit = max(0, int(os.getenv("CI_RETRY_ATTEMPTS", "3")))
+        retry_limit = min(1, max(0, int(os.getenv("CI_RETRY_ATTEMPTS", "1"))))
         candidates.extend(
             task for task in store.list({TaskStatus.BLOCKED})
             if task.repository in repositories and (
                 (
                     task.ci_status == "failed"
                     and task.ci_attempts <= retry_limit
+                    and task.implementation_attempts < 2
                 ) or (
                     task.metadata.get("final_review_status") == "changes_required"
                     and task.metadata.get("final_review_repairs", 0) <= retry_limit
+                    and task.implementation_attempts < 2
                 ) or task.metadata.get("recovery_pending", False)
             )
         )
@@ -1061,8 +1063,22 @@ def _poll_ready_issues(
                         getattr(item, "name", str(item))
                         for item in getattr(issue, "labels", ())
                     )
+                    original_body = issue.body or ""
+                    issue_body = format_issue_contract(
+                        issue.title or "", original_body, issue_labels
+                    )
+                    if issue_body != original_body:
+                        client.update_issue_body(issue.number, issue_body)
+                        client.upsert_issue_comment(
+                            issue.number,
+                            "<!-- investory-orchestrator-formatting -->\n"
+                            f"{mention}I formatted this issue into the ready-to-develop "
+                            "structure. The original description is preserved verbatim "
+                            "at the bottom; formatting did not add product requirements.",
+                            marker="<!-- investory-orchestrator-formatting -->",
+                        )
                     validation = validate_issue_contract(
-                        issue.title or "", issue.body or "", issue_labels
+                        issue.title or "", issue_body, issue_labels
                     )
                     if not validation.valid:
                         details = "\n".join(f"- {error}" for error in validation.errors)
@@ -1080,7 +1096,10 @@ def _poll_ready_issues(
                 task = store.create(
                     issue_number=issue.number,
                     title=issue.title,
-                    body=issue.body or "",
+                    body=(
+                        issue_body if existing is None
+                        else issue.body or ""
+                    ),
                     source="github_issue",
                     repository=repository,
                     metadata={"base_branch": config["base_branch"], "ready_label": label},
@@ -1670,7 +1689,7 @@ def _run_final_review(store: TaskStore, task: Any) -> None:
                 metadata.get("final_review_job_sequence", 0)
             ) + 1
         attempts = metadata.get("final_review_attempts", 0) + 1
-        retry_limit = max(0, int(os.getenv("MAX_FINAL_REVIEW_ATTEMPTS", "3")))
+        retry_limit = min(1, max(0, int(os.getenv("MAX_FINAL_REVIEW_ATTEMPTS", "1"))))
         retryable = attempts < retry_limit
         store.transition(
             task.task_id,

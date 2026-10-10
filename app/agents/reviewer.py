@@ -21,6 +21,8 @@ class ReviewFinding(BaseModel):
     description: str
     file: str | None = None
     recommendation: str
+    concrete_proposal: str = ""
+    implementation_details: list[str] = Field(default_factory=list)
 
 
 class ReviewResult(BaseModel):
@@ -290,6 +292,10 @@ Review rules:
 - Use `warning` or `suggestion` for non-critical improvements, including
   optional test expansion, maintainability, style, or follow-up work. These are
   recorded in the review comment and must not send the coder back.
+- For every blocking finding, give a concrete proposal, affected behavior or
+  file, and ordered implementation/test details that the coder can apply in
+  one repair round. Do not return a blocker that only says to investigate or
+  reconsider.
 - The final status is `changes_required` only when explicit requirements are
   missing or at least one critical (`blocking`) finding exists. Otherwise it
   is `approved`, even when warnings or suggestions are present.
@@ -382,6 +388,12 @@ def review_to_markdown(review: ReviewResult) -> str:
                     f"  - {finding.description}",
                     f"  - Fix: {finding.recommendation}",
                 ]
+            )
+            if finding.concrete_proposal:
+                lines.append(f"  - Proposal: {finding.concrete_proposal}")
+            lines.extend(
+                f"  - Next-round detail: {item}"
+                for item in finding.implementation_details
             )
 
     if review.tests_reviewed:

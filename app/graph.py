@@ -1553,6 +1553,12 @@ def route_after_final_validation(state: WorkflowState) -> str:
     ):
         return "final_reviewer"
 
+    if (
+        state.get("workflow_mode") == "simplified"
+        and state["attempt"] + state["final_attempt"] >= 2
+    ):
+        return "isolate_final_validation_failure"
+
     if state["final_attempt"] == 0:
         return "final_integration_coder"
 
@@ -1785,6 +1791,12 @@ def route_after_final_reviewer(state: WorkflowState) -> str:
     if state["final_review_status"] == "approved":
         return "prepare_finalize_history"
 
+    if (
+        state.get("workflow_mode") == "simplified"
+        and state["attempt"] + state["final_attempt"] >= 2
+    ):
+        return "isolate_final_review_failure"
+
     if state["final_attempt"] == 0:
         return "final_integration_coder"
 
@@ -1823,8 +1835,9 @@ def _isolate_final_attempt(
             "error": message,
         }
 
-    exhausted = (
-        state["final_attempt"] >= state["max_final_attempts"]
+    exhausted = state["final_attempt"] >= state["max_final_attempts"] or (
+        state.get("workflow_mode") == "simplified"
+        and state["attempt"] + state["final_attempt"] >= 2
     )
     reason = ""
 
