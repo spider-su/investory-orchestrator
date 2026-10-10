@@ -162,21 +162,26 @@ class GraphCompletionTests(unittest.TestCase):
             result["side_effect_history"][-1]["outcome"], "no_changes"
         )
 
-    def test_documentation_only_task_skips_container_start(self) -> None:
+    def test_documentation_only_task_starts_container_for_required_checks(self) -> None:
         state = {
+            "workspace": "/tmp/issue-42",
+            "issue_number": 42,
             "issue_body": (
                 "Make documentation changes only. "
                 "Do not run application tests; documentation-only."
             )
         }
 
-        with patch("app.graph.start_environment") as start_mock:
+        with patch(
+            "app.graph.start_environment",
+            return_value={"success": True, "output": "started"},
+        ) as start_mock:
             result = start_environment_node(state)
 
         self.assertTrue(result["environment_ready"])
-        self.assertFalse(result["environment_started"])
-        self.assertIn("application tests are prohibited", result["environment_output"])
-        start_mock.assert_not_called()
+        self.assertTrue(result["environment_started"])
+        self.assertEqual(result["environment_output"], "started")
+        start_mock.assert_called_once()
 
     def test_coder_resume_starts_environment_again(self) -> None:
         state = {"workspace": "/tmp/issue-42", "issue_number": 42}
@@ -191,7 +196,7 @@ class GraphCompletionTests(unittest.TestCase):
         self.assertTrue(result["environment_started"])
         self.assertEqual(result["environment_output"], "started")
 
-    def test_documentation_only_coder_resume_keeps_container_skipped(self) -> None:
+    def test_documentation_only_coder_resume_starts_container_for_required_checks(self) -> None:
         state = {
             "workspace": "/tmp/issue-42",
             "issue_number": 42,
@@ -199,12 +204,15 @@ class GraphCompletionTests(unittest.TestCase):
                 "Documentation-only. Do not run application tests."
             ),
         }
-        with patch("app.graph.start_environment") as start_mock:
+        with patch(
+            "app.graph.start_environment",
+            return_value={"success": True, "output": "started"},
+        ) as start_mock:
             result = resume_environment_node(state)
 
-        start_mock.assert_not_called()
+        start_mock.assert_called_once()
         self.assertTrue(result["environment_ready"])
-        self.assertFalse(result["environment_started"])
+        self.assertTrue(result["environment_started"])
 
     def test_cleanup_does_not_stop_container_that_was_not_started(self) -> None:
         state = {

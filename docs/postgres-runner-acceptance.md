@@ -26,21 +26,27 @@ task data was changed during this acceptance work.
 - On the devMac, Codex CLI authentication and quota were healthy, and both
   configured model IDs (`gpt-6-luna` and `gpt-6-sol`) returned a model probe.
 - A one-shot Mac runner registered capabilities, checked quota, claimed one
-  fixture job, and persisted its result through PostgreSQL. The test used a
-  temporary `kubectl port-forward`, a unique schema, and a fake task subprocess;
-  the schema was dropped and verified absent afterward.
+  fixture job, and persisted its result through PostgreSQL. That acceptance run
+  used a temporary `kubectl port-forward`, a unique schema, and a fake task
+  subprocess; the schema was dropped and verified absent afterward.
+- Direct TCP connectivity from devMac (`192.168.1.7`) to the shared development
+  PostgreSQL host at `192.168.1.60:5432` was verified on 2026-10-10. Its
+  development-only connection settings are in Investory's local profile; keep
+  those credentials local and never copy them into task specs, logs, or this
+  repository.
 
 ## Acceptance still required
 
-The Mac has no installed runner LaunchAgent or `runner.env`. The scheduler's
-PostgreSQL service is a Kubernetes ClusterIP and is not directly reachable from
-the Mac over the LAN. The one-shot test therefore proves the runner transport
-and job lifecycle against the live database, but does not prove persistent
-runner startup, a real Codex implementation task, GitHub PR/CI repair, crash
-recovery, or post-merge completion.
+The Mac has no installed runner LaunchAgent or `runner.env`. The one-shot test
+proves runner transport and job lifecycle through a temporary port-forward, but
+does not prove that the persistent runner can use the direct `.60` development
+database endpoint. Validate that direct connection from the runner, including
+its ability to create, use, and drop only a uniquely named task schema, before
+enabling persistent dispatch. The run also does not prove real Codex
+implementation, GitHub PR/CI repair, crash recovery, or post-merge completion.
 
-Before switching deployment settings, provide an approved shared database
-endpoint that the Mac can reach, install the matching runner revision and
-LaunchAgent, confirm heartbeat/capabilities/quota, then run the acceptance
+Before switching deployment settings, configure the runner to use the shared
+development database endpoint directly, install the matching runner revision
+and LaunchAgent, confirm heartbeat/capabilities/quota, then run the acceptance
 scenarios in [`operations.md`](operations.md). Keep one dispatcher active and
 leave SSH/legacy mode enabled until those scenarios pass.

@@ -45,7 +45,6 @@ from app.side_effects import (
 from app.state import WorkflowState
 from app.tasks import TaskStore
 from app.test_runner import (
-    is_documentation_only_task,
     run_validation,
     start_environment,
     stop_environment,
@@ -494,25 +493,6 @@ def collect_repository_context_node(
 
 
 def start_environment_node(state: WorkflowState) -> dict:
-    if is_documentation_only_task(state.get("issue_body", "")):
-        message = (
-            "Skipped Dev Container startup for documentation-only task; "
-            "application tests are prohibited by the issue."
-        )
-        print(message)
-        return {
-            "environment_ready": True,
-            "environment_started": False,
-            "environment_output": message,
-            "cleanup_status": "success",
-            "cleanup_output": message,
-            "cleanup_resume_stage": "",
-            "cleanup_resume_reason": "",
-            "validation_status": "not_started",
-            "validation_exit_code": 0,
-            "error": "",
-        }
-
     print("Starting Dev Container environment")
 
     result = start_environment(
@@ -554,22 +534,6 @@ def start_environment_node(state: WorkflowState) -> dict:
 
 def resume_environment_node(state: WorkflowState) -> dict:
     """Restart target services before resuming a coder-stage checkpoint."""
-    if is_documentation_only_task(state.get("issue_body", "")):
-        message = (
-            "Skipped Dev Container startup for documentation-only task; "
-            "application tests are prohibited by the issue."
-        )
-        print(message)
-        return {
-            "environment_ready": True,
-            "environment_started": False,
-            "environment_output": message,
-            "cleanup_status": "success",
-            "cleanup_output": message,
-            "validation_status": "not_started",
-            "validation_exit_code": 0,
-            "error": "",
-        }
     print("Restarting Dev Container environment for checkpoint resume")
     result = start_environment(Path(state["workspace"]), state["issue_number"])
     if result["success"]:

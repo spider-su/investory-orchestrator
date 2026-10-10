@@ -221,40 +221,38 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "environment_failure")
         self.assertIn("Unsupported target adapter", result["output"])
 
-    def test_documentation_only_issue_skips_application_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            subprocess.run(["git", "init", "-b", "develop"], cwd=workspace, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
-            subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=workspace, check=True)
-            readme = workspace / "README.md"
-            readme.write_text("Initial\n", encoding="utf-8")
-            subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
-            subprocess.run(["git", "commit", "-m", "baseline"], cwd=workspace, check=True, capture_output=True)
-            baseline = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=workspace,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            readme.write_text("Updated docs\n", encoding="utf-8")
-
-            issue_body = (
-                "Make documentation changes only. "
-                "Do not run application tests; this task is documentation-only."
+    def test_documentation_only_issue_still_runs_target_validation(self) -> None:
+        expected = {
+            "status": "success",
+            "success": True,
+            "exit_code": 0,
+            "output": "formatter and unit tests passed",
+        }
+        with patch(
+            "app.test_runner.validate_documentation_scope",
+            return_value={
+                "status": "success",
+                "success": True,
+                "exit_code": 0,
+                "output": "documentation scope passed",
+            },
+        ), patch(
+            "app.test_runner._configured_target_adapter"
+        ) as adapter_factory:
+            adapter_factory.return_value.run_validation.return_value = expected
+            result = run_validation(
+                Path("/tmp/workspace"),
+                104,
+                issue_body=(
+                    "Make documentation changes only. "
+                    "Do not run application tests."
+                ),
             )
-            with patch("app.test_runner._configured_target_adapter") as adapter:
-                result = run_validation(
-                    workspace,
-                    104,
-                    issue_body=issue_body,
-                    baseline_sha=baseline,
-                )
 
-        self.assertTrue(result["success"])
-        self.assertIn("Application tests were skipped", result["output"])
-        adapter.assert_not_called()
+        self.assertEqual(result, expected)
+        adapter_factory.return_value.run_validation.assert_called_once_with(
+            Path("/tmp/workspace"), 104
+        )
 
     def test_documentation_only_validation_rejects_application_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -272,18 +270,20 @@ class TestRunnerTests(unittest.TestCase):
             ).stdout.strip()
             source.write_text("print('changed')\n", encoding="utf-8")
 
-            result = run_validation(
-                workspace,
-                104,
-                issue_body=(
-                    "Make documentation changes only. "
-                    "Do not run application tests."
-                ),
-                baseline_sha=baseline,
-            )
+            with patch("app.test_runner._configured_target_adapter") as adapter:
+                result = run_validation(
+                    workspace,
+                    104,
+                    issue_body=(
+                        "Make documentation changes only. "
+                        "Do not run application tests."
+                    ),
+                    baseline_sha=baseline,
+                )
 
         self.assertFalse(result["success"])
         self.assertIn("non-documentation files: app.py", result["output"])
+        adapter.assert_not_called()
 
     def test_run_limits_command_output(self) -> None:
         _, output = _run(

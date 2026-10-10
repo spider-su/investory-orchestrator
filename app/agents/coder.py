@@ -172,6 +172,13 @@ Instructions:
   material product decision is genuinely missing and no safe in-scope action
   or no-op can satisfy the step.
 - Inspect AGENTS.md and repository documentation before editing.
+- Before returning a candidate, run the repository's documented formatter
+  check and unit test command(s). If formatting fails, run the repository's
+  formatter, then rerun the formatter check and unit tests after the final
+  source edit. Fix failures caused by the change; do not leave either check
+  red. No issue wording can waive these required checks. Record the exact
+  commands and outcomes in `testsRun` and `evidence`; never claim a check was
+  run when it was not.
 - Implement only this issue.
 - Make the smallest correct change.
 - Add or update tests when required.
@@ -180,7 +187,8 @@ Instructions:
 - Do not access or print secrets.
 - Leave all edits in the current workspace.
 - Do not commit, push, or create a pull request.
-- The orchestrator runs the complete validation suite separately.
+- The orchestrator independently reruns the complete deterministic validation
+  suite. Reviewer routing is blocked unless it succeeds.
 
 Return a JSON object matching this contract:
 {{

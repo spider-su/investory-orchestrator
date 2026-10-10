@@ -141,9 +141,10 @@ For each normalized plan step:
 3. Run the coder with the issue, exactly the current step, attempt metadata,
    initial checkout audit, previous validation output, reviewer findings, and
    relevant Git diff.
-4. Run deterministic validation selected from the task scope. Documentation-only
-   issues that prohibit application tests use `git diff --check` and a changed-
-   path scope check without starting the target test suite or Dev Container.
+4. Have Codex run the repository's documented formatter check and unit tests,
+   recording exact commands and outcomes. Then run deterministic target-
+   repository validation in the Dev Container. Both checks must pass before
+   review; documentation-only wording does not waive them.
 5. Route validation failures back to the coder while attempts remain.
 6. In `legacy` mode, run a review for each validated step. In `simplified`
    mode, skip those repeated reviews and retain the final independent review.
@@ -210,14 +211,14 @@ Automated review has two separate layers:
 2. **LLM review** evaluates the validated diff against the issue, plan, scope,
    acceptance criteria, repository rules, and validation output.
 
-The implementation gate has two responsibilities: deterministic validation and
-GitHub Actions must be green, and the developer must implement every explicit
-issue and approved-plan item before completion. The reviewer may return work to
-the coder for an unmet in-scope requirement or a critical correctness or safety
-defect. Every blocker must include a concrete proposal and ordered
-implementation/test details. Medium and minor findings remain visible as
-warnings or suggestions in the issue or PR review comment; they do not start
-another coder pass by themselves.
+Review requires passing formatter and unit-test validation plus green GitHub
+Actions checks. The developer must also implement every explicit issue and
+approved-plan item before completion. The reviewer may return work to the coder
+for an unmet in-scope requirement or a critical correctness or safety defect.
+Every blocker must include a concrete proposal and ordered implementation/test
+details. Medium and minor findings remain visible as warnings or suggestions in
+the issue or PR review comment; they do not start another coder pass by
+themselves.
 
 An LLM review may be called **independent** only when all of these conditions
 hold:
@@ -235,7 +236,9 @@ hold:
   identity as review evidence.
 - The reviewer model identity differs from the coder model identity.
 - Deterministic validation runs outside the reviewer and must succeed before
-  the LLM review can approve the change.
+  the LLM review can approve the change. The target validation entry point must
+  run the repository formatter check and unit tests, and fail if either is
+  skipped or fails.
 
 A different provider is preferred because it reduces correlated model and
 infrastructure failures, but it is not mandatory. A different model identity

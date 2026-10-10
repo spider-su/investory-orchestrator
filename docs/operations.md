@@ -13,7 +13,8 @@ Before starting a run:
 2. Verify GitHub App credentials and repository configuration.
 3. Verify the coding backend is authenticated and has available quota.
 4. Confirm the target repository supplies its Dev Container and validation
-   entry point.
+   entry point, and that the entry point runs the repository formatter check
+   and unit tests, failing if either is skipped or red.
 
 Only an empty issue or an unsafe, unresolved product decision should stop
 preflight. A formatting pass does not consume a Codex run.

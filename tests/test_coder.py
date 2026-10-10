@@ -138,6 +138,10 @@ class CoderTests(unittest.TestCase):
         self.assertIn("no-op can satisfy the step", prompt)
         self.assertIn('"branch": "agent/issue-42"', prompt)
         self.assertIn("Do not commit, push, or create a pull request.", prompt)
+        self.assertIn("run the repository's documented formatter", prompt)
+        self.assertIn("unit test command(s)", prompt)
+        self.assertIn("No issue wording can waive these required checks", prompt)
+        self.assertIn("Reviewer routing is blocked unless it succeeds", prompt)
 
     def test_run_coder_wraps_timeout_output(self) -> None:
         with patch("app.agents.coder._git_diff", return_value=""):

@@ -495,12 +495,12 @@ def is_documentation_only_task(issue_body: str) -> bool:
     ) and "do not run application tests" in normalized
 
 
-def run_documentation_validation(
+def validate_documentation_scope(
     workspace: Path,
     *,
     baseline_sha: str = "",
 ) -> CommandResult:
-    """Validate documentation-only changes without starting app tests."""
+    """Check documentation-only scope without waiving the test suite."""
     baseline = baseline_sha or "HEAD"
     check = _run(
         ["git", "diff", "--check", baseline, "--"],
@@ -508,18 +508,12 @@ def run_documentation_validation(
         timeout=30,
     )
     if check.kind != "completed":
-        return _environment_failure(
-            check,
-            "Could not run documentation whitespace validation:",
-        )
+        return _environment_failure(check, "Could not run git diff --check:")
     if check.exit_code:
         return _result(
             "project_validation_failure",
             exit_code=check.exit_code,
-            output=(
-                "Documentation whitespace validation failed.\n"
-                f"{check.output}"
-            ),
+            output=f"Documentation whitespace validation failed.\n{check.output}",
         )
 
     changed = _run(
@@ -533,15 +527,9 @@ def run_documentation_validation(
         timeout=30,
     )
     if changed.kind != "completed" or changed.exit_code:
-        return _environment_failure(
-            changed,
-            "Could not inspect changed documentation paths:",
-        )
+        return _environment_failure(changed, "Could not inspect changed paths:")
     if untracked.kind != "completed" or untracked.exit_code:
-        return _environment_failure(
-            untracked,
-            "Could not inspect untracked workspace paths:",
-        )
+        return _environment_failure(untracked, "Could not inspect untracked paths:")
 
     changed_paths = (
         changed.output.splitlines()
@@ -553,11 +541,7 @@ def run_documentation_validation(
         if untracked.output != "(command produced no output)"
         else []
     )
-    paths = sorted({
-        path.strip()
-        for path in [*changed_paths, *untracked_paths]
-        if path.strip()
-    })
+    paths = sorted({path.strip() for path in [*changed_paths, *untracked_paths] if path.strip()})
     documentation_extensions = {".md", ".mdx", ".rst", ".adoc", ".txt"}
     non_documentation = [
         path for path in paths
@@ -572,26 +556,14 @@ def run_documentation_validation(
                 + ", ".join(non_documentation)
             ),
         )
-
-    status = _run(
-        ["git", "status", "--short", "--untracked-files=all"],
-        workspace=workspace,
-        timeout=30,
+    return _result(
+        "success",
+        exit_code=0,
+        output=(
+            "Documentation-only scope passed. "
+            f"Changed paths: {', '.join(paths) if paths else '(none)'}"
+        ),
     )
-    if status.kind != "completed" or status.exit_code:
-        return _environment_failure(
-            status,
-            "Could not capture final documentation worktree status:",
-        )
-    output = (
-        "Documentation-only validation passed. Application tests were skipped "
-        "as required by the issue.\n"
-        f"$ git diff --check {baseline}\npassed\n"
-        f"$ git status --short --untracked-files=all\n"
-        f"{status.output or '(clean)'}\n"
-        f"Changed paths: {', '.join(paths) if paths else '(none)'}"
-    )
-    return _result("success", exit_code=0, output=output)
 
 
 def start_environment(
@@ -611,15 +583,23 @@ def run_validation(
     issue_body: str = "",
     baseline_sha: str = "",
 ) -> CommandResult:
+    scope_result = None
     if is_documentation_only_task(issue_body):
-        return run_documentation_validation(
+        scope_result = validate_documentation_scope(
             workspace,
             baseline_sha=baseline_sha,
         )
-    return _configured_target_adapter().run_validation(
+        if not scope_result["success"]:
+            return scope_result
+
+    result = _configured_target_adapter().run_validation(
         workspace,
         issue_number,
     )
+    if scope_result is None:
+        return result
+    result["output"] = f"{scope_result['output']}\n{result['output']}"
+    return result
 
 
 def stop_environment(
