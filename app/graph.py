@@ -154,12 +154,6 @@ def planner_node(state: WorkflowState) -> dict:
             f"{len(plan.open_questions)} open question(s)"
         )
 
-    if state.get("workflow_mode") == "simplified":
-        # Retain the planner's requirements and acceptance criteria, while
-        # making implementation a single Codex coding pass for this task.
-        from app.agents.planner import consolidate_plan
-
-        plan = consolidate_plan(plan)
     markdown = plan_to_markdown(plan)
     plan_dict = plan.model_dump(mode="json")
     steps = [
@@ -1904,7 +1898,12 @@ def route_after_prepare_finalize_history(state: WorkflowState) -> str:
 
 
 def finalize_history_node(state: WorkflowState) -> dict:
-    print("Replacing checkpoint commits with final logical commit")
+    preserve_steps = state.get("workflow_mode") == "simplified"
+    print(
+        "Preserving validated step commits"
+        if preserve_steps
+        else "Replacing checkpoint commits with final logical commit"
+    )
 
     intent = state.get("side_effect_intent", {})
     if (
@@ -1928,6 +1927,7 @@ def finalize_history_node(state: WorkflowState) -> dict:
             issue_number=state["issue_number"],
             issue_title=state["issue_title"],
             allowed_paths=_approved_paths_for_steps(state["steps"]),
+            **({"preserve_step_commits": True} if preserve_steps else {}),
         )
     except RuntimeError as error:
         if (
@@ -1960,7 +1960,7 @@ def finalize_history_node(state: WorkflowState) -> dict:
             "error": message,
         }
 
-    print(f"Final logical commit: {commit_sha}")
+    print(f"Final branch tip: {commit_sha}")
     return {
         "final_commit_sha": commit_sha,
         "commit_sha": commit_sha,

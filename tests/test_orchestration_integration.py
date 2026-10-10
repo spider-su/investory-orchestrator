@@ -195,6 +195,7 @@ class OrchestrationIntegrationTests(unittest.TestCase):
                 "PUBLISH_PLAN_COMMENT": "true",
                 "PUBLISH_REVIEW_COMMENT": "true",
                 "MAX_ATTEMPTS": "2",
+                "WORKFLOW_MODE": "simplified",
                 "CODER_MODEL": "codex-coder",
                 "REVIEWER_MODEL": "codex-reviewer",
             }
@@ -312,7 +313,8 @@ class OrchestrationIntegrationTests(unittest.TestCase):
         self.assertEqual(github.pull_requests[0]["base"], "develop")
         self.assertEqual(coder.call_count, 1)
         self.assertEqual(validation.call_count, 2)
-        self.assertEqual(step_review.call_count, 2)
+        # The graph reviews the whole plan once, without a per-step review.
+        self.assertEqual(step_review.call_count, 1)
         self.assertEqual(final_review.call_count, 1)
 
 

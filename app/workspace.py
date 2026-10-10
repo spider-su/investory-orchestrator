@@ -556,8 +556,9 @@ def finalize_checkpoint_history(
     issue_number: int,
     issue_title: str,
     allowed_paths: Iterable[str] | None = None,
+    preserve_step_commits: bool = False,
 ) -> str:
-    """Replace local checkpoint commits with one final logical commit."""
+    """Finalize reviewed history, optionally retaining validated step commits."""
     _mark_safe_directory(workspace)
 
     _run(
@@ -589,6 +590,11 @@ def finalize_checkpoint_history(
     ).strip()
 
     if actual_checkpoint_sha != expected_checkpoint_sha:
+        if preserve_step_commits:
+            raise RuntimeError(
+                "Workspace HEAD changed before finalization: "
+                f"expected {expected_checkpoint_sha}, got {actual_checkpoint_sha}"
+            )
         if actual_checkpoint_sha != baseline_sha:
             raise RuntimeError(
                 "Workspace HEAD changed before final history rewrite: "
@@ -624,15 +630,32 @@ def finalize_checkpoint_history(
     if tree_sha == baseline_tree_sha:
         raise RuntimeError("No implementation changes remain for final commit.")
 
+    if preserve_step_commits:
+        _run(
+            ["git", "merge-base", "--is-ancestor", baseline_sha,
+             actual_checkpoint_sha],
+            cwd=workspace,
+        )
+        checkpoint_tree_sha = _run(
+            ["git", "rev-parse", f"{actual_checkpoint_sha}^{{tree}}"],
+            cwd=workspace,
+        ).strip()
+        if tree_sha == checkpoint_tree_sha:
+            return actual_checkpoint_sha
+
     final_sha = _run(
         [
             "git",
             "commit-tree",
             tree_sha,
             "-p",
-            baseline_sha,
+            actual_checkpoint_sha if preserve_step_commits else baseline_sha,
             "-m",
-            f"Implement #{issue_number}: {issue_title}",
+            (
+                f"Complete integration-repair: {issue_title}"
+                if preserve_step_commits
+                else f"Implement #{issue_number}: {issue_title}"
+            ),
             "-m",
             f"Investory-Operation-Id: {operation_id}",
         ],

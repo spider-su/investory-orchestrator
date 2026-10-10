@@ -54,7 +54,9 @@ REVIEWER_MODEL=
 ```
 
 `WORKFLOW_MODE` accepts `legacy` or `simplified`. New tasks default to
-`simplified`, which consolidates the full plan and caps coding at two rounds.
+`simplified`, which validates and commits each planned increment, then runs
+full validation and one independent whole-plan review. Step commits remain in
+the PR. Local repair limits and the task-wide repair budget still apply.
 Existing checkpoints retain their saved mode. Legacy mode is available for
 compatibility only.
 

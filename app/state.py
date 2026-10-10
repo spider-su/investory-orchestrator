@@ -22,6 +22,7 @@ class WorkflowState(TypedDict):
     repository_context: str
 
     workflow_status: WorkflowStatus
+    workflow_mode: str
 
     plan: dict[str, Any]
     plan_markdown: str

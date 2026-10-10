@@ -147,6 +147,10 @@ Planning rules:
 - Add open questions only when implementation would otherwise be unsafe or
   materially ambiguous.
 - Prefer small steps that can be implemented and validated independently.
+- Use a few coherent increments, each leaving formatting and relevant unit
+  tests green. Avoid splitting trivial edits into separate steps. The
+  orchestrator commits each validated increment and runs full validation and
+  one independent whole-plan review after all steps are complete.
 - Keep issue-required evidence gathering as a separate read-only step when it
   must happen before edits. State explicitly that the workspace must remain
   unchanged and identify the evidence to report.

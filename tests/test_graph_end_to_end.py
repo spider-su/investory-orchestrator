@@ -141,6 +141,12 @@ def initial_state(issue_number: int) -> dict:
 
 class GraphEndToEndTests(unittest.TestCase):
     def test_successful_issue_reaches_draft_pull_request(self) -> None:
+        self._run_successful_issue("legacy", 1)
+
+    def test_simplified_steps_validate_and_commit_before_one_final_review(self) -> None:
+        self._run_successful_issue("simplified", 2)
+
+    def _run_successful_issue(self, mode: str, step_count: int) -> None:
         fake_client = FakeGitHubClient()
         plan = ImplementationPlan(
             goal="Add a deterministic fixture.",
@@ -166,6 +172,12 @@ class GraphEndToEndTests(unittest.TestCase):
             status="approved",
             summary="Implementation satisfies the plan.",
         )
+        if step_count == 2:
+            plan.steps.append(plan.steps[0].model_copy(update={
+                "id": "step-02",
+                "title": "Extend fixture",
+                "depends_on": ["step-01"],
+            }))
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -280,8 +292,10 @@ class GraphEndToEndTests(unittest.TestCase):
 
                 graph = build_graph()
                 try:
+                    state = initial_state(42)
+                    state["workflow_mode"] = mode
                     result = graph.invoke(
-                        initial_state(42),
+                        state,
                         config={
                             "configurable": {
                                 "thread_id": "test-successful-issue"
@@ -292,8 +306,8 @@ class GraphEndToEndTests(unittest.TestCase):
                     close_graph(graph)
 
         self.assertEqual(result["workflow_status"], "completed")
-        self.assertEqual(result["completed_steps"], ["step-01"])
-        self.assertEqual(result["steps"][0]["status"], "completed")
+        self.assertEqual(result["completed_steps"], [step.id for step in plan.steps])
+        self.assertTrue(all(step["status"] == "completed" for step in result["steps"]))
         self.assertEqual(result["final_commit_sha"], "final-sha")
         self.assertEqual(result["pull_request_number"], 7)
         self.assertEqual(
@@ -305,15 +319,18 @@ class GraphEndToEndTests(unittest.TestCase):
 
         start_mock.assert_called_once()
         stop_mock.assert_called_once()
-        coder_mock.assert_called_once()
-        self.assertEqual(validation_mock.call_count, 2)
-        self.assertEqual(review_mock.call_count, 2)
-        checkpoint_mock.assert_called_once()
+        self.assertEqual(coder_mock.call_count, step_count)
+        self.assertEqual(validation_mock.call_count, step_count + 1)
+        self.assertEqual(review_mock.call_count, 1 if mode == "simplified" else 2)
+        self.assertEqual(checkpoint_mock.call_count, step_count)
         finalization_mock.assert_called_once()
+        if mode == "simplified":
+            self.assertTrue(finalization_mock.call_args.kwargs["preserve_step_commits"])
         push_mock.assert_called_once()
-        self.assertEqual(len(result["side_effect_history"]), 6)
+        expected_operations = (4 if mode == "simplified" else 5) + step_count
+        self.assertEqual(len(result["side_effect_history"]), expected_operations)
         self.assertEqual(result["side_effect_intent"], {})
-        self.assertEqual(len(fake_client.comments), 2)
+        self.assertEqual(len(fake_client.comments), 1 if mode == "simplified" else 2)
         self.assertEqual(len(fake_client.created_pull_requests), 1)
         created_pr = fake_client.created_pull_requests[0]
         self.assertEqual(created_pr["head"], "agent/issue-42")

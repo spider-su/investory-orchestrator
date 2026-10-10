@@ -156,15 +156,18 @@ approval of the current step.
 
 ## Simplified workflow migration
 
-`WORKFLOW_MODE=simplified` consolidates a generated multi-step plan into one
-implementation step. It preserves the union of the planner's requirements,
-acceptance criteria, validation commands, affected areas, and exclusions, then
-runs the existing coder and deterministic validation. Per-step review is
-skipped; the independent final review still gates publication. The task gets
-at most two coder rounds total: an initial implementation and one repair round.
-The repair round receives the concrete change proposal and ordered file,
-behavior, and test details from review. A second failed review or validation
-blocks with its diagnostics; it cannot start a third coder round.
+`WORKFLOW_MODE=simplified` preserves the planner's small, independently
+testable increments. Each step runs the coder and deterministic validation,
+including formatting and relevant unit tests, before creating its commit.
+Per-step review is skipped; full validation and the independent whole-plan
+review gate publication. Failed steps archive diagnostics and reset only to
+the current step's baseline, retaining earlier successful commits. Repair
+limits still apply, including the task-wide repair budget. Review repairs
+receive concrete proposals and ordered file, behavior, and test details.
+
+Validated step commits remain in the single task PR. An approved integration
+repair adds a commit on top of them. Existing saved plans are retained as-is;
+a previously consolidated plan is not reconstructed or replanned on resume.
 
 The planner remains a separate read-only Codex invocation. The chosen mode is
 stored in task checkpoints and runner job configuration. Checkpoints created
@@ -318,7 +321,7 @@ Approved steps therefore create local checkpoint commits that:
 - provide resume and recovery boundaries
 - isolate subsequent step work
 - remain local until final approval
-- may be rewritten or removed
+- remain in the PR in simplified mode; legacy mode may rewrite them
 - are not final architectural decisions
 
 After the final checkpoint, the orchestrator runs whole-plan validation and
@@ -346,7 +349,11 @@ checkpoint tip
 `MAX_FINAL_ATTEMPTS` bounds these repair attempts and defaults to
 `MAX_ATTEMPTS`.
 
-After approval, checkpoint history is replaced with one logical commit. The
+In simplified mode, finalization retains the tested step commits and adds an
+integration-repair commit only if the final repair changed files. Repeating
+finalization is safe and does not create duplicate commits.
+
+In legacy mode, after approval checkpoint history is replaced with one logical commit. The
 orchestrator creates the commit object first, then compare-and-set updates the
 local branch ref from the expected checkpoint tip:
 
@@ -356,7 +363,7 @@ git commit-tree <final-tree> -p <issue-baseline-sha>
 git update-ref <branch-ref> <final-commit> <checkpoint-tip>
 ```
 
-Only the final logical commit is pushed. Checkpoint SHAs remain in workflow
+In legacy mode, only the final logical commit is pushed. Checkpoint SHAs remain in workflow
 state for diagnostics but are no longer reachable from the issue branch.
 
 ## Completion and pull requests

@@ -39,9 +39,10 @@ GitHub issue or direct task prompt
 ```
 
 The executable workflow currently defaults to the legacy multi-step graph.
-An opt-in `WORKFLOW_MODE=simplified` consolidates the planned steps into one
-implementation pass and removes per-step reviews while preserving final
-validation and independent review. Migration details are described in
+`WORKFLOW_MODE=simplified` keeps a few coherent implementation steps. Each
+step passes formatting and relevant unit tests before its commit; a failed
+later step preserves earlier successful commits. Full validation and one
+independent whole-plan review gate publication of one PR with those commits. Migration details are described in
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Quick start
