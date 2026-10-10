@@ -71,6 +71,15 @@ class GitHubAppClient:
                 f"{error.status} {error.data}"
             ) from error
 
+    def update_issue_body(self, issue_number: int, body: str) -> None:
+        try:
+            self.get_issue(issue_number).edit(body=body)
+        except GithubException as error:
+            raise RuntimeError(
+                f"Failed to update issue #{issue_number}: "
+                f"{error.status} {error.data}"
+            ) from error
+
     def list_ready_issues(self, label: str) -> list[Issue]:
         """Return open issues carrying the execution-authorization label."""
         try:

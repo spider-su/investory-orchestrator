@@ -17,7 +17,7 @@ from app.task_scheduler import (
     reconcile_merged_task,
     run_queue,
 )
-from app.issue_validation import validate_issue_contract
+from app.issue_validation import format_issue_contract, validate_issue_contract
 
 
 GraphFactory = Callable[[], Any]
@@ -42,7 +42,7 @@ def build_initial_state(
     title: str = "",
     body: str = "",
 ) -> WorkflowState:
-    workflow_mode = os.getenv("WORKFLOW_MODE", "legacy").strip().lower()
+    workflow_mode = os.getenv("WORKFLOW_MODE", "simplified").strip().lower()
     if workflow_mode not in {"legacy", "simplified"}:
         raise ValueError("WORKFLOW_MODE must be 'legacy' or 'simplified'")
     return {
@@ -72,17 +72,20 @@ def build_initial_state(
         "remote_baseline_sha": "",
         "checkpoint_commits": [],
         "attempt": 0,
-        "max_attempts": int(os.getenv("MAX_ATTEMPTS", "3")),
+        "max_attempts": (
+            min(2, max(1, int(os.getenv("MAX_ATTEMPTS", "2"))))
+            if workflow_mode == "simplified"
+            else int(os.getenv("MAX_ATTEMPTS", "3"))
+        ),
         "step_baseline_sha": "",
         "attempt_artifacts": [],
         "last_failed_patch_path": "",
         "final_baseline_sha": "",
         "final_attempt": 0,
-        "max_final_attempts": int(
-            os.getenv(
-                "MAX_FINAL_ATTEMPTS",
-                os.getenv("MAX_ATTEMPTS", "3"),
-            )
+        "max_final_attempts": (
+            1
+            if workflow_mode == "simplified"
+            else int(os.getenv("MAX_FINAL_ATTEMPTS", os.getenv("MAX_ATTEMPTS", "3")))
         ),
         "last_failed_final_patch_path": "",
         "final_validation_status": "not_started",
@@ -272,11 +275,17 @@ def run_cli(
             raise RuntimeError(f"Repository is disabled in configuration: {repository}")
         client = GitHubAppClient()
         issue = client.get_issue(args.submit_issue)
-        validation = validate_issue_contract(
-            issue.title or "",
-            issue.body or "",
-            tuple(getattr(label, "name", str(label)) for label in getattr(issue, "labels", ())),
+        labels = tuple(
+            getattr(label, "name", str(label))
+            for label in getattr(issue, "labels", ())
         )
+        original_body = issue.body or ""
+        issue_body = format_issue_contract(
+            issue.title or "", original_body, labels
+        )
+        if issue_body != original_body:
+            client.update_issue_body(issue.number, issue_body)
+        validation = validate_issue_contract(issue.title or "", issue_body, labels)
         if not validation.valid:
             errors = "\n".join(f"- {item}" for item in validation.errors)
             marker = "<!-- investory-orchestrator-intake-status -->"
@@ -293,7 +302,7 @@ def run_cli(
         task = task_store.create(
             issue_number=issue.number,
             title=issue.title,
-            body=issue.body or "",
+            body=issue_body,
             source="github_issue",
             repository=repository,
             metadata={
@@ -524,6 +533,8 @@ def run_cli(
                 str(saved_state["max_attempts"]),
             )
         )
+        if saved_state.get("workflow_mode") == "simplified":
+            configured_max_attempts = min(2, max(1, configured_max_attempts))
 
         configured_max_final_attempts = int(
             os.getenv(
@@ -531,6 +542,8 @@ def run_cli(
                 str(saved_state.get("max_final_attempts", 3)),
             )
         )
+        if saved_state.get("workflow_mode") == "simplified":
+            configured_max_final_attempts = 1
 
         if (
             blocked_stage == "coder"

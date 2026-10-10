@@ -130,6 +130,7 @@ class CoderTests(unittest.TestCase):
         self.assertIn("{'id': 'step-01', 'title': 'Add tests'}", prompt)
         self.assertIn("Previous validation failed.", prompt)
         self.assertIn("{'status': 'changes_required'}", prompt)
+        self.assertIn("do not defer any of them", prompt)
         self.assertIn("git diff text", prompt)
         self.assertIn("Implement exactly the current implementation step", prompt)
         self.assertIn("No safe cleanup candidates found.", prompt)

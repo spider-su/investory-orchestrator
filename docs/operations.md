@@ -7,16 +7,16 @@ recovery. Workflow design is documented in [`architecture.md`](architecture.md).
 
 Before starting a run:
 
-1. Complete the issue contract in [`issue-contract.md`](issue-contract.md). The
-   scheduler validates labeled GitHub issues before creating a task or workspace.
+1. Add the `ready_to_develop` label. The scheduler formats non-empty issue
+   descriptions that miss the contract headings and preserves the original
+   text before creating a task or workspace.
 2. Verify GitHub App credentials and repository configuration.
 3. Verify the coding backend is authenticated and has available quota.
 4. Confirm the target repository supplies its Dev Container and validation
    entry point.
 
-Issues that fail preflight remain labeled and receive an issue comment listing
-the required corrections. The scheduler retries validation during later issue
-polls.
+Only an empty issue or an unsafe, unresolved product decision should stop
+preflight. A formatting pass does not consume a Codex run.
 
 ## Configuration
 
@@ -31,11 +31,11 @@ GITHUB_REPOSITORY=spider-su/investory
 WORKSPACES_DIR=/app/workspaces
 TASK_DB=/app/data/tasks.db
 BASE_BRANCH=main
-MAX_ATTEMPTS=3
+MAX_ATTEMPTS=2
 MAX_REPAIRS=3
-WORKFLOW_MODE=legacy
-MAX_FINAL_ATTEMPTS=3
-CI_RETRY_ATTEMPTS=3
+WORKFLOW_MODE=simplified
+MAX_FINAL_ATTEMPTS=1
+CI_RETRY_ATTEMPTS=1
 MAX_ACTIVE_TASKS=3
 MAX_CODEX_PROCESSES=2
 MAX_BUILDS=1
@@ -52,10 +52,10 @@ CODER_MODEL=
 REVIEWER_MODEL=
 ```
 
-`WORKFLOW_MODE` accepts `legacy` or `simplified`. Keep `legacy` for saved
-workflows. `simplified` consolidates new tasks into one implementation step
-and keeps the final independent review gate; it is currently opt-in while the
-new route is validated.
+`WORKFLOW_MODE` accepts `legacy` or `simplified`. New tasks default to
+`simplified`, which consolidates the full plan and caps coding at two rounds.
+Existing checkpoints retain their saved mode. Legacy mode is available for
+compatibility only.
 
 `MAX_REPAIRS` is the task-wide limit for actual code repair invocations across
 local validation/review and CI/final-review repair. The limit and usage are
@@ -68,11 +68,10 @@ repairing, or publishing) so the lifecycle does not need a separate status for
 each workflow node.
 
 The scheduler polls enabled repositories at each repository's configured
-`poll_interval_seconds` (minimum 30 seconds). Before task creation, it checks
-the issue contract in [`issue-contract.md`](issue-contract.md). An invalid
-issue gets a corrective comment; its ready label stays in place, and no task,
-workspace, or Codex invocation is created. A valid issue is persisted, then
-receives a stable status comment and has its label removed. The dashboard shows
+`poll_interval_seconds` (minimum 30 seconds). It formats malformed, non-empty
+issue descriptions in place and preserves the original text. The normalized
+issue is persisted, receives a stable status comment, and has its label
+removed. The dashboard shows
 task progress and Mac runner/queue health. Once CI and independent final review
 pass, the draft PR is marked ready for review and the configured GitHub login
 is mentioned. You review and merge the PR. After successful post-merge CI, the

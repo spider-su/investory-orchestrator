@@ -147,11 +147,19 @@ Instructions:
 - Implement exactly the current implementation step above. Do not implement
   requirements assigned to later steps, even when they are visible in the
   issue or plan.
+- Complete every requirement and acceptance criterion assigned to this step;
+  do not defer any of them to a future task, issue, or implementation pass.
+  Later-step boundaries are not a reason to defer work explicitly assigned to
+  the current step.
 - If the current step is inspection or inventory only, make no workspace
   changes and report concrete evidence in `evidence`.
 - Treat accepted results from completed steps as available evidence and build
   on them. Do not ask the user to provide findings, files, or evidence already
   present in the issue, approved plan, completed-step results, or repository.
+- On a repair round, implement the reviewer's concrete proposal and ordered
+  implementation details for every blocking finding, then rerun the relevant
+  tests. Keep non-critical findings as comments; do not spend another round
+  debating them.
 - A step may be completed without code changes when its requirements are
   already satisfied or prior evidence shows there is no safe, in-scope change
   to make. Record that conclusion and preserve uncertain items instead of

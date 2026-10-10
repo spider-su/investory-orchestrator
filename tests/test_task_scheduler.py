@@ -540,6 +540,9 @@ class TaskSchedulerTests(unittest.TestCase):
             def remove_issue_label(self, issue_number, label):
                 self.removed.append((issue_number, label))
 
+            def update_issue_body(self, issue_number, body):
+                issue.body = body
+
             def upsert_issue_comment(self, issue_number, body, *, marker):
                 self.comments.append((issue_number, body, marker))
 
@@ -569,6 +572,7 @@ class TaskSchedulerTests(unittest.TestCase):
             list_ready_issues=lambda label: [issue],
             remove_issue_label=unittest.mock.Mock(side_effect=[RuntimeError("temporary"), None]),
             upsert_issue_comment=unittest.mock.Mock(),
+            update_issue_body=unittest.mock.Mock(),
         )
         with (
             patch.dict(os.environ, {"READY_ISSUE_LABEL": "ready_to_develop"}),
@@ -579,7 +583,7 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual(len(self.store.list()), 1)
         self.assertEqual(client.remove_issue_label.call_count, 2)
 
-    def test_invalid_ready_issue_is_not_queued_and_keeps_label(self) -> None:
+    def test_malformed_ready_issue_is_formatted_and_queued(self) -> None:
         issue = SimpleNamespace(
             number=9,
             title="Incomplete issue",
@@ -590,6 +594,7 @@ class TaskSchedulerTests(unittest.TestCase):
             list_ready_issues=lambda label: [issue],
             remove_issue_label=unittest.mock.Mock(),
             upsert_issue_comment=unittest.mock.Mock(),
+            update_issue_body=unittest.mock.Mock(),
         )
         with (
             patch.dict(os.environ, {"READY_ISSUE_LABEL": "ready_to_develop"}),
@@ -597,12 +602,13 @@ class TaskSchedulerTests(unittest.TestCase):
         ):
             queued = _poll_ready_issues(self.store, now=3000)
 
-        self.assertEqual(queued, 0)
-        self.assertEqual(self.store.list(), [])
-        client.remove_issue_label.assert_not_called()
-        comment = client.upsert_issue_comment.call_args.args[1]
-        self.assertIn("No workspace or Codex run was started.", comment)
-        self.assertIn("ready_to_develop", comment)
+        self.assertEqual(queued, 1)
+        task = self.store.get("spider-su/investory#9")
+        self.assertIsNotNone(task)
+        self.assertIn("## Acceptance criteria", task.body)
+        self.assertIn("## Original issue description\nOnly a vague request.", task.body)
+        client.update_issue_body.assert_called_once()
+        client.remove_issue_label.assert_called_once_with(9, "ready_to_develop")
 
     def test_queue_obeys_build_limit(self) -> None:
         first = self.store.create(title="first")
@@ -820,7 +826,13 @@ class TaskSchedulerTests(unittest.TestCase):
 
     def test_ci_failure_dispatches_a_repair_worker(self) -> None:
         task = self.store.create(title="repair CI")
-        task = self.store.transition(task.task_id, TaskStatus.BLOCKED, ci_status="failed", ci_attempts=1)
+        task = self.store.transition(
+            task.task_id,
+            TaskStatus.BLOCKED,
+            ci_status="failed",
+            ci_attempts=1,
+            implementation_attempts=1,
+        )
         process = SimpleNamespace(pid=987656, wait=lambda: 0)
         with (
             patch("app.task_scheduler.subprocess.Popen", return_value=process) as popen,
@@ -864,7 +876,8 @@ class TaskSchedulerTests(unittest.TestCase):
             ci_task.task_id,
             TaskStatus.BLOCKED,
             ci_status="failed",
-            ci_attempts=4,
+            ci_attempts=1,
+            implementation_attempts=2,
         )
         review_task = self.store.create(title="exhausted review")
         self.store.transition(
@@ -872,8 +885,9 @@ class TaskSchedulerTests(unittest.TestCase):
             TaskStatus.BLOCKED,
             metadata={
                 "final_review_status": "changes_required",
-                "final_review_repairs": 4,
+                "final_review_repairs": 1,
             },
+            implementation_attempts=2,
         )
         with (
             patch.dict(os.environ, {"CI_RETRY_ATTEMPTS": "3"}),

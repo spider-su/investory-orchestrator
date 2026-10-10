@@ -48,6 +48,7 @@ class CliTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "WORKFLOW_MODE": "legacy",
                 "MAX_ATTEMPTS": "4",
                 "MAX_FINAL_ATTEMPTS": "5",
             },
@@ -68,6 +69,21 @@ class CliTests(unittest.TestCase):
             config["configurable"]["thread_id"],
             "investory-issue-42",
         )
+
+    def test_new_workflow_defaults_to_two_coder_rounds(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            state = build_initial_state(42)
+
+        self.assertEqual(state["workflow_mode"], "simplified")
+        self.assertEqual(state["max_attempts"], 2)
+        self.assertEqual(state["max_final_attempts"], 1)
+
+    def test_simplified_workflow_caps_requested_attempts_at_two(self) -> None:
+        with patch.dict(os.environ, {"MAX_ATTEMPTS": "10"}, clear=True):
+            state = build_initial_state(42)
+
+        self.assertEqual(state["max_attempts"], 2)
+        self.assertEqual(state["max_final_attempts"], 1)
 
     def test_resume_updates_checkpoint_then_continues(self) -> None:
         saved_state = {

@@ -25,6 +25,7 @@ _YES_NO_FIELDS = (
     "dependency changes allowed",
     "configuration changes allowed",
 )
+_FORMATTED_MARKER = "<!-- investory-orchestrator-formatted-issue:v1 -->"
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,93 @@ def validate_issue_contract(
             )
 
     return IssueValidation(valid=not errors, errors=tuple(errors))
+
+
+def format_issue_contract(
+    title: str,
+    body: str,
+    labels: tuple[str, ...] | list[str] = (),
+) -> str:
+    """Wrap an unstructured request in the canonical contract, preserving it verbatim.
+
+    Formatting supplies conservative workflow defaults, not new product
+    behavior. The original description remains available as the source of
+    truth so the planner can refine the implementation scope from it.
+    """
+    body = body or ""
+    if _FORMATTED_MARKER in body:
+        return body
+    original = body.strip()
+    if not title.strip():
+        return body or ""
+    if not original:
+        original = "(No description was provided; use the issue title as the request.)"
+    if validate_issue_contract(title, original, labels).valid:
+        return original
+
+    def permitted(keywords: tuple[str, ...]) -> str:
+        folded = original.casefold()
+        for keyword in keywords:
+            escaped = re.escape(keyword)
+            if re.search(rf"\b(?:no|not|without|avoid)\b.{{0,50}}\b{escaped}\b", folded):
+                return "no"
+            if re.search(rf"\b{escaped}\b", folded):
+                return "yes"
+        return "no"
+
+    bug_sections = ""
+    label_set = {label.strip().casefold() for label in labels}
+    if label_set.intersection({"bug", "type: bug", "type/bug"}):
+        bug_sections = """## Current behavior
+Confirm the current behavior from the original request, repository, and tests.
+
+## Expected behavior
+Implement the behavior requested in the original issue description.
+
+## Reproduction
+Use original reproduction details when present and add a deterministic regression test.
+
+"""
+
+    formatted = f"""{_FORMATTED_MARKER}
+<!-- The sections below are formatting defaults; the original request is preserved verbatim. -->
+
+## Goal
+{title.strip()}
+
+## Context
+The complete original request is preserved under **Original issue description** below.
+
+## Product decisions
+- Follow existing repository behavior and conventions.
+- Preserve compatibility and avoid expanding the requested scope.
+
+## Scope
+### In scope
+- Implement the behavior requested in the original issue description.
+
+### Out of scope
+- Unrelated behavior changes, dependencies, and refactoring.
+
+## Acceptance criteria
+- The behavior requested in the original issue description is implemented and covered by appropriate tests.
+
+## Validation
+- Run the relevant automated tests and configured CI checks.
+- Keep existing relevant regression checks passing.
+
+## Change constraints
+- Database migration allowed: {permitted(('migration', 'schema', 'database', 'persistence', 'table'))}
+- Breaking API change allowed: {permitted(('breaking API', 'breaking change'))}
+- Dependency changes allowed: {permitted(('dependency', 'dependencies', 'new library'))}
+- Configuration changes allowed: {permitted(('configuration change', 'config change'))}
+
+{bug_sections}## Original issue description
+{original}
+"""
+    if validate_issue_contract(title, formatted, labels).valid:
+        return formatted
+    return original
 
 
 def _sections(markdown: str) -> dict[str, str]:

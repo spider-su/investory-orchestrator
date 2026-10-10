@@ -1,17 +1,20 @@
 # Ready-to-develop issue contract
 
 Issues carrying the `ready_to_develop` label are queued automatically. The
-workflow validates the issue contract before workspace creation and planning;
-the label authorizes execution but does not bypass validation.
+workflow checks the description before workspace creation. When it is
+unstructured, it wraps the original text in the standard sections, preserves
+the original verbatim, and records conservative repository-convention defaults.
+Formatting alone does not reject an issue or consume a Codex run.
 
 ## Ownership
 
 The issue author owns product intent. Agents own implementation choices inside
 the declared scope and constraints.
 
-An issue is ready to develop only when all material product, business,
-compatibility, and UX decisions have already been made. The planner must not be
-required to act as a product manager.
+The issue author supplies the requested outcome. Agents resolve routine
+technical choices from repository conventions, preserve compatibility, and
+keep scope narrow. Only an empty issue or a material product, security, or
+data-loss decision that cannot be inferred safely should block execution.
 
 ## Required issue structure
 
@@ -121,44 +124,30 @@ Examples of optional implementation details:
 - internal package placement when repository conventions already determine it
 - choice between equivalent internal algorithms
 
-## Rejection conditions
+## Automatic formatting and validation
 
-Do not execute an issue when:
+If a non-empty issue does not follow the required structure, the formatter adds
+the canonical headings, derives the goal from the title, and puts the complete
+original request under `## Original issue description`. It adds conservative
+defaults for scope, acceptance criteria, validation, and change constraints,
+without rewriting or removing original text. Constraints default to `no`
+unless the request clearly requires that category of change. Bug labels receive
+current/expected/reproduction headings; agents verify those details from the
+preserved request, repository, and tests.
 
-- the goal is absent or only says to improve, fix, or test something
-- acceptance criteria are missing or cannot be observed
-- scope boundaries are missing
-- a required product decision is delegated to the planner or coder
-- change permissions are unspecified
-- a bug has neither reproduction steps nor a deterministic failing test
-- unresolved placeholders such as `TBD` remain
-- requirements contradict one another
-
-## Planned automatic preflight
-
-Automatic validation should execute immediately after issue loading:
+Preflight is:
 
 ```text
 load issue
-→ validate issue contract
-├── invalid → stop and report missing or conflicting fields
-└── valid
-    → prepare workspace
-    → collect repository context
-    → planner
+→ validate description
+→ format it in place when needed, preserving original text
+→ queue and retain `ready_to_develop` authorization
+→ planner resolves routine details from the repository
+→ stop only for a genuinely unsafe or irreversible missing decision
 ```
 
-A queued task requires both:
-
-```text
-`ready_to_develop` label
-AND
-valid issue contract
-```
-
-The label is human authorization to execute. The scheduler validates the
-contract before creating a task or workspace. If validation fails, it posts a
-stable comment listing the missing information and leaves the label in place
-for correction and rechecking. A valid issue is durably queued, receives a
-stable status comment, and has its ready label removed. The planner and reviewer
-then use the issue's acceptance criteria to guide and assess implementation.
+The `ready_to_develop` label is the execution authorization. The scheduler
+updates the issue body when formatting is needed, posts a short formatting
+notice, queues the normalized description, and removes the label as its
+acknowledgement. Empty title/body and GitHub update failures remain operational
+errors; they do not consume a coder round.

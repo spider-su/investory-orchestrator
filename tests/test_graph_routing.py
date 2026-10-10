@@ -211,6 +211,17 @@ class GraphRoutingTests(unittest.TestCase):
             ),
             "isolate_final_validation_failure",
         )
+        self.assertEqual(
+            route_after_final_validation(
+                {
+                    "workflow_mode": "simplified",
+                    "attempt": 2,
+                    "final_attempt": 0,
+                    "final_validation_status": "project_validation_failure",
+                }
+            ),
+            "isolate_final_validation_failure",
+        )
 
     def test_route_after_final_integration_coder(self) -> None:
         self.assertEqual(
@@ -251,6 +262,17 @@ class GraphRoutingTests(unittest.TestCase):
                 {
                     "final_review_status": "changes_required",
                     "final_attempt": 1,
+                }
+            ),
+            "isolate_final_review_failure",
+        )
+        self.assertEqual(
+            route_after_final_reviewer(
+                {
+                    "workflow_mode": "simplified",
+                    "attempt": 2,
+                    "final_attempt": 0,
+                    "final_review_status": "changes_required",
                 }
             ),
             "isolate_final_review_failure",

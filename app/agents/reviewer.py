@@ -21,6 +21,8 @@ class ReviewFinding(BaseModel):
     description: str
     file: str | None = None
     recommendation: str
+    concrete_proposal: str = ""
+    implementation_details: list[str] = Field(default_factory=list)
 
 
 class ReviewResult(BaseModel):
@@ -213,12 +215,9 @@ def review_implementation(
         """
 - Review the complete implementation across every plan step.
 - Verify all issue-level acceptance criteria and interactions between steps.
-- Look for abstractions that became unsuitable as later steps were added.
-- Look for duplicated concepts, compensating workarounds, inconsistent public
-  APIs, incompatible migrations or configuration, and missing integration tests.
-- A locally valid earlier step must not be treated as immutable.
-- Request changes when redesigning an earlier checkpoint would produce a more
-  coherent implementation.
+- Do not request redesign solely for maintainability, style, or preference.
+- Request changes to an earlier checkpoint only when a critical defect or an
+  unmet explicit plan requirement makes that necessary.
 """
         if review_scope == "whole_plan"
         else """
@@ -267,6 +266,14 @@ Review scope:
 
 Review rules:
 {scope_rules}
+- The review gate has two responsibilities:
+  1. Confirm the supplied validation evidence is successful. Workflow routing
+     sends code to review only after the configured validation gate passes;
+     GitHub Actions is checked separately after the draft PR is created.
+  2. Confirm every explicit requirement and acceptance criterion in the active
+     review scope is implemented. At whole-plan review, verify every planned
+     step and issue-level acceptance criterion; do not accept work deferred to
+     a future task or issue.
 - Review only against the issue and approved plan.
 - Review only the active implementation step. Work assigned to later steps
   is out of scope until those steps are active.
@@ -276,13 +283,22 @@ Review rules:
 - Verify acceptance criteria for the active review scope. For a step review,
   assess the current step only; for a whole-plan review, assess the issue and
   all plan steps.
-- Check for missing behaviour, incorrect behaviour, unrelated changes,
-  weakened tests, missing tests, and unsafe error handling.
-- Any unmet acceptance criterion within the active scope requires the
-  changes_required status.
-- Any blocking finding requires the changes_required status.
-- An implementation may still be approved if it has only warnings or
-  suggestions.
+- Only report a requirement as missing when it is explicit in the issue or
+  approved plan and is not implemented or already satisfied with evidence.
+- Use `blocking` only for a critical defect that makes implemented behavior
+  materially incorrect, unsafe, or violates an explicit acceptance criterion.
+  Missing explicit plan work is also a gate failure. Do not mark medium or minor
+  concerns as blocking.
+- Use `warning` or `suggestion` for non-critical improvements, including
+  optional test expansion, maintainability, style, or follow-up work. These are
+  recorded in the review comment and must not send the coder back.
+- For every blocking finding, give a concrete proposal, affected behavior or
+  file, and ordered implementation/test details that the coder can apply in
+  one repair round. Do not return a blocker that only says to investigate or
+  reconsider.
+- The final status is `changes_required` only when explicit requirements are
+  missing or at least one critical (`blocking`) finding exists. Otherwise it
+  is `approved`, even when warnings or suggestions are present.
 - Do not modify code.
 - Do not invent findings unsupported by the supplied evidence.
 """.strip()
@@ -302,11 +318,11 @@ Review rules:
     if not isinstance(result, ReviewResult):
         raise ReviewerError("Reviewer returned an unexpected response type.")
 
-    if result.missing_requirements or any(
+    has_gate_failure = bool(result.missing_requirements) or any(
         finding.severity == "blocking"
         for finding in result.findings
-    ):
-        result.status = "changes_required"
+    )
+    result.status = "changes_required" if has_gate_failure else "approved"
 
     return result
 
@@ -372,6 +388,12 @@ def review_to_markdown(review: ReviewResult) -> str:
                     f"  - {finding.description}",
                     f"  - Fix: {finding.recommendation}",
                 ]
+            )
+            if finding.concrete_proposal:
+                lines.append(f"  - Proposal: {finding.concrete_proposal}")
+            lines.extend(
+                f"  - Next-round detail: {item}"
+                for item in finding.implementation_details
             )
 
     if review.tests_reviewed:
